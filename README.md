@@ -12,9 +12,17 @@ V-Zero improves fine-grained visual reasoning without annotated answer labels. T
   <img src="resource/method.png" alt="V-Zero Method Overview" width="100%">
 </p>
 
+## Training
+
+The full training code is included under [`verl/`](verl/), with the main launcher in [`verl/examples/on_policy_distillation_trainer/run_vzero_qwen35_vl_fsdp.sh`](verl/examples/on_policy_distillation_trainer/run_vzero_qwen35_vl_fsdp.sh). It configures the V-Zero on-policy distillation recipe with teacher replay, positive/negative evidence crops, and evidence-gated token distillation.
+
+The bundled training stack is based on `verl`; its original license and notice files are kept in [`verl/LICENSE`](verl/LICENSE) and [`verl/Notice.txt`](verl/Notice.txt).
+
+See [`verl/examples/on_policy_distillation_trainer/README.md`](verl/examples/on_policy_distillation_trainer/README.md) for data schema, environment variables, and launch examples.
+
 ## TODO
 
-- [ ] Release training code
+- [x] Release training code
 - [ ] Release data preparation scripts
 - [ ] Release evaluation scripts
 - [ ] Release model checkpoints
