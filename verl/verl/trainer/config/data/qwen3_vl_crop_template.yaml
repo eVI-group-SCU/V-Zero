@@ -1,0 +1,14 @@
+defaults:
+  - legacy_data
+  - _self_
+
+# System prompt prepended by RLHFDataset when a sample has no system message.
+system_prompt: |-
+  You are a helpful assistant.
+   The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. The answer are enclosed within <answer> </answer> tags, respectively, i.e., reasoning process here <answer> answer here </answer>
+
+# Minimum image pixels passed into structured Qwen-VL image content.
+image_min_pixels: 65536
+
+# Maximum image pixels passed into structured Qwen-VL image content.
+image_max_pixels: 16777216
