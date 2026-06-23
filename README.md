@@ -2,7 +2,7 @@
 
 **V-Zero: Answer-Label-Free On-Policy Distillation with Contrastive Evidence Gating for Fine-Grained Visual Reasoning**
 
-[[Paper]](resource/V-Zero.pdf)
+[[Paper]](resource/V-Zero.pdf) [[Model]](https://huggingface.co/hao05/v-zero-4b)
 
 ## Overview
 
@@ -29,7 +29,7 @@ See [`scripts/README.md`](scripts/README.md) for data schema, environment variab
 - [x] Release training code
 - [ ] Release data preparation scripts
 - [ ] Release evaluation scripts
-- [ ] Release model checkpoints
+- [x] Release model checkpoints
 - [ ] Add detailed reproduction instructions
 
 ## License
