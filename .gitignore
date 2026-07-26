@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 results/
+data/annotation/
 data/eval/
 .env
 *.env
