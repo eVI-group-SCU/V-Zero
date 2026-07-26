@@ -24,6 +24,17 @@ uv pip install -e .
 
 See [`scripts/README.md`](scripts/README.md) for data schema, environment variables, and launch examples.
 
+## Annotation
+
+The data annotation utilities are included under [`annotation/`](annotation/). Copy the Seed template, fill local credentials, and run the relabeling entry point with explicit dataset and output paths:
+
+```bash
+cp .seed.env.example .seed.env
+bash annotation/label.sh \
+  --dataset <train-parquet-path> \
+  --output-dir results/annotation
+```
+
 ## Evaluation
 
 The evaluation framework is included under [`eval/`](eval/), with launch helpers in [`scripts/start_vllm_server.sh`](scripts/start_vllm_server.sh) and [`scripts/eval_benchmarks.sh`](scripts/eval_benchmarks.sh). Copy the Seed judge template and fill local credentials before running judge-based evaluation:
@@ -65,7 +76,7 @@ bash scripts/eval_benchmarks.sh \
 ## TODO
 
 - [x] Release training code
-- [ ] Release data preparation scripts
+- [x] Release data preparation scripts
 - [x] Release evaluation scripts
 - [x] Release model checkpoints
 - [ ] Add detailed reproduction instructions
