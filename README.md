@@ -2,7 +2,7 @@
 
 **V-Zero: Answer-Label-Free On-Policy Distillation with Contrastive Evidence Gating for Fine-Grained Visual Reasoning**
 
-[[Paper]](https://arxiv.org/abs/2606.25319) [[Model]](https://huggingface.co/hao05/v-zero-4b)
+[[Paper]](https://arxiv.org/abs/2606.25319) [[Model]](https://huggingface.co/hao05/v-zero-4b) [[Dataset]](https://huggingface.co/datasets/hao05/v-zero-5k)
 
 ## Overview
 
@@ -11,6 +11,10 @@ V-Zero improves fine-grained visual reasoning without annotated answer labels. T
 <p align="center">
   <img src="resource/method.png" alt="V-Zero Method Overview" width="100%">
 </p>
+
+## Dataset
+
+The V-Zero-5K dataset is publicly available on Hugging Face: [`hao05/v-zero-5k`](https://huggingface.co/datasets/hao05/v-zero-5k).
 
 ## Training
 
@@ -79,6 +83,7 @@ bash scripts/eval_benchmarks.sh \
 - [x] Release data preparation scripts
 - [x] Release evaluation scripts
 - [x] Release model checkpoints
+- [x] Release the V-Zero-5K dataset
 - [ ] Add detailed reproduction instructions
 
 ## License
