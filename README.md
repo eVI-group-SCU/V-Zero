@@ -16,15 +16,30 @@ V-Zero improves fine-grained visual reasoning without annotated answer labels. T
 
 The V-Zero-5K dataset is publicly available on Hugging Face: [`hao05/v-zero-5k`](https://huggingface.co/datasets/hao05/v-zero-5k).
 
+## Environment
+
+The complete dependency set is pinned in a single [`requirements.txt`](requirements.txt), exported from the AutoDL experiment environment. It targets Linux x86_64, Python 3.12.13, and CUDA 13.0. Run the following commands from the repository root:
+
+```bash
+conda create -n v-zero python=3.12.13 -y
+conda activate v-zero
+python -m pip install uv==0.11.18
+uv pip install --no-deps -r requirements.txt
+uv pip install -e . --no-deps
+```
+
+All direct and transitive packages are already listed, so `--no-deps` preserves the exact versions and intentional overrides used by the experiment image. The repository also includes its `hf-xet` development wheel because that version is no longer available from a public package index; only unused debug symbols were stripped to keep the repository small. The pinned PyTorch, vLLM, FlashAttention, FlashInfer, and `hf-xet` wheels are Linux-specific and require an x86_64 host with an NVIDIA driver compatible with CUDA 13.0.
+
+When using the original AutoDL image, activate its existing environment and only repoint the editable repository installation:
+
+```bash
+conda activate verl
+uv pip install -e . --no-deps
+```
+
 ## Training
 
 The V-Zero training implementation is included under [`verl/`](verl/), with the public launcher in [`scripts/run_vzero_qwen35_vl_fsdp.sh`](scripts/run_vzero_qwen35_vl_fsdp.sh). It configures the on-policy distillation recipe with teacher replay, positive/negative evidence crops, and evidence-gated token distillation.
-
-Install the training package from the repository root:
-
-```bash
-uv pip install -e .
-```
 
 See [`scripts/README.md`](scripts/README.md) for data schema, environment variables, and launch examples.
 
