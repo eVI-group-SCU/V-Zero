@@ -45,14 +45,16 @@ See [`scripts/README.md`](scripts/README.md) for data schema, environment variab
 
 ## Annotation
 
-The data annotation utilities are included under [`annotation/`](annotation/). Copy the Seed template, fill local credentials, and run the relabeling entry point with explicit dataset and output paths:
+The annotation tools support positive grounding and three negative crop variants:
 
-```bash
-cp .seed.env.example .seed.env
-bash annotation/label.sh \
-  --dataset <train-parquet-path> \
-  --output-dir results/annotation
-```
+| Task | Entry point |
+| --- | --- |
+| Positive bbox / point | `annotation/label.sh` |
+| Random negative bbox / point | `annotation/label_random_negative.sh` |
+| Nearby negative bbox / point | `annotation/label_nearby_negative.sh` |
+| Same-size black negative images | `python -m annotation.black_crops` |
+
+See [the annotation guide](annotation/README.md) for environment setup, API configuration, input requirements, and runnable examples. See [negative crop details](annotation/NEGATIVE_CROPS.md) for coordinate validation, outputs, and resume behavior.
 
 ## Evaluation
 
