@@ -500,7 +500,9 @@ class AgentLoopWorker:
         self.evidence_weighting_config = config.distillation.get("evidence_weighting", {}) or {}
         self.evidence_weighting_enabled = self.evidence_weighting_config.get("enabled", False)
         self.evidence_negative_mode = self.evidence_weighting_config.get("negative_mode", "downsample_teacher_crop")
-        self.evidence_negative_image_key = self.evidence_weighting_config.get("negative_image_key", "teacher_neg_images")
+        self.evidence_negative_image_key = self.evidence_weighting_config.get(
+            "negative_image_key", "teacher_neg_images"
+        )
         self.evidence_negative_prompt_key = self.evidence_weighting_config.get(
             "negative_prompt_key", "teacher_neg_raw_prompt"
         )
@@ -653,6 +655,10 @@ class AgentLoopWorker:
         return multi_modal_data
 
     def _downsample_teacher_images(self, images: Any) -> list[Image.Image]:
+        if self.evidence_negative_mode == "pixelate_teacher_image":
+            from verl.trainer.distillation.visual_advantage import pixelate_images
+
+            return pixelate_images(images, self.evidence_weighting_config.get("pixelation_ratio", 0.1))
         if self.evidence_negative_mode != "downsample_teacher_crop":
             raise ValueError(f"Unsupported evidence negative mode: {self.evidence_negative_mode!r}.")
         image_list = list(images) if isinstance(images, (list, tuple)) else [images]
@@ -909,7 +915,7 @@ class AgentLoopWorker:
         negative_teacher_prompt_ids = None
         negative_teacher_prompt_length = None
         if self.evidence_weighting_enabled:
-            if self.evidence_negative_mode == "downsample_teacher_crop":
+            if self.evidence_negative_mode in {"downsample_teacher_crop", "pixelate_teacher_image"}:
                 negative_teacher_multi_modal_data = self._build_negative_teacher_multi_modal_data(
                     teacher_multi_modal_data
                 )
@@ -966,7 +972,7 @@ class AgentLoopWorker:
         negative_teacher_prompt_ids = None
         negative_teacher_prompt_length = None
         if self.evidence_weighting_enabled:
-            if self.evidence_negative_mode == "downsample_teacher_crop":
+            if self.evidence_negative_mode in {"downsample_teacher_crop", "pixelate_teacher_image"}:
                 negative_teacher_multi_modal_data = self._build_negative_teacher_multi_modal_data(
                     teacher_multi_modal_data
                 )

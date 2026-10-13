@@ -40,6 +40,13 @@ teacher_ema:
 evidence_weighting:
   _target_: verl.workers.config.DistillationEvidenceWeightingConfig
   enabled: false
+  objective: relative_evidence
+  temperature: 1.0
+  high_va_fraction: 0.2
+  high_va_weight: 0.5
+  pixelation_ratio: 0.1
+  rollout_reweighting: true
+  token_grouping: true
   negative_mode: downsample_teacher_crop
   negative_image_key: teacher_neg_images
   negative_prompt_key: teacher_neg_raw_prompt

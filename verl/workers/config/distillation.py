@@ -122,9 +122,16 @@ class DistillationLossConfig(BaseConfig):
 
 @dataclass
 class DistillationEvidenceWeightingConfig(BaseConfig):
-    """Relative evidence weighting for OPD rollouts."""
+    """Legacy evidence gating or Visual-Advantage OPD weighting."""
 
     enabled: bool = False
+    objective: str = "relative_evidence"
+    temperature: float = 1.0
+    high_va_fraction: float = 0.2
+    high_va_weight: float = 0.5
+    pixelation_ratio: float = 0.1
+    rollout_reweighting: bool = True
+    token_grouping: bool = True
     negative_mode: str = "downsample_teacher_crop"
     negative_image_key: str = "teacher_neg_images"
     negative_prompt_key: str = "teacher_neg_raw_prompt"
@@ -138,7 +145,17 @@ class DistillationEvidenceWeightingConfig(BaseConfig):
     def __post_init__(self):
         if not self.enabled:
             return
-        supported_modes = {"downsample_teacher_crop", "hard_negative_crop"}
+        if self.objective not in {"relative_evidence", "va_opd"}:
+            raise ValueError("Unknown evidence weighting objective.")
+        if self.temperature <= 0 or self.eps <= 0:
+            raise ValueError("VA temperature and eps must be positive.")
+        if not 0 < self.high_va_fraction < 1 or not 0 < self.high_va_weight < 1:
+            raise ValueError("VA fraction and weight must be strictly between 0 and 1.")
+        if not 0 < self.pixelation_ratio < 1:
+            raise ValueError("VA pixelation_ratio must be strictly between 0 and 1.")
+        if self.objective == "va_opd" and self.negative_mode != "pixelate_teacher_image":
+            raise ValueError("VA-OPD requires negative_mode='pixelate_teacher_image'.")
+        supported_modes = {"downsample_teacher_crop", "hard_negative_crop", "pixelate_teacher_image"}
         if self.negative_mode not in supported_modes:
             raise ValueError(
                 "distillation.evidence_weighting.negative_mode must be one of "
@@ -392,6 +409,15 @@ class DistillationConfig(BaseConfig):
             raise ValueError(
                 "distillation.evidence_weighting.enabled=True requires distillation.teacher_crop.enabled=True."
             )
+        if evidence_weighting_enabled and self.evidence_weighting.objective == "va_opd":
+            if self.teacher_crop.prompt_key != "raw_prompt":
+                raise ValueError("VA-OPD must replay the student's raw_prompt with the full image.")
+            if self.distillation_loss.use_task_rewards:
+                raise ValueError("VA-OPD requires use_task_rewards=False.")
+            if self.distillation_loss.loss_mode not in {"k1", "kl", "k3", "low_var_kl"}:
+                raise ValueError("VA-OPD requires a reverse-KL estimator (k1/k3).")
+            if self.distillation_loss.loss_settings.use_topk:
+                raise ValueError("VA-OPD currently requires sampled-token teacher logprobs (k1/k3).")
         if teacher_ema_enabled and not self.teacher_ema.require_same_model:
             raise NotImplementedError("distillation.teacher_ema.require_same_model=False is not supported yet.")
         if not self.enabled:

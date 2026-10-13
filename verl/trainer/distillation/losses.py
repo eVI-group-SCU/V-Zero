@@ -215,8 +215,9 @@ def distillation_ppo_loss(
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
-    distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
+    # ppo_loss sets global_batch_info used by distillation aggregation.
     policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
+    distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
     if not distillation_loss_config.use_task_rewards:
         policy_loss = 0.0
 
@@ -255,7 +256,9 @@ def distillation_loss(
     )
     response_mask = data["response_mask"]
     loss_agg_mode = config.loss_agg_mode
-
+    va_enabled = (
+        distillation_config.evidence_weighting.enabled and distillation_config.evidence_weighting.objective == "va_opd"
+    )
     distillation_metrics.update(
         compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
     )
@@ -264,6 +267,18 @@ def distillation_loss(
     if loss_config.loss_max_clamp is not None:
         # clamping min is for k1 loss which can be negative
         distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
+
+    if va_enabled:
+        if loss_agg_mode != "seq-mean-token-sum":
+            raise ValueError("VA-OPD requires actor.loss_agg_mode='seq-mean-token-sum'.")
+        token_weights = data.get("va_token_weights")
+        if token_weights is None:
+            raise ValueError("VA-OPD is missing va_token_weights from the full rollout batch.")
+        if token_weights.is_nested:
+            token_weights = token_weights.to_padded_tensor(0.0)
+        if token_weights.shape != distillation_losses.shape:
+            raise ValueError("VA token weights must align with response losses.")
+        distillation_losses = distillation_losses * token_weights.to(distillation_losses).detach()
 
     opd_weights = data.get("opd_weights", None)
     if opd_weights is not None:

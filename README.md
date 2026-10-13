@@ -43,6 +43,12 @@ The V-Zero training implementation is included under [`verl/`](verl/), with the 
 
 See [`scripts/README.md`](scripts/README.md) for data schema, environment variables, and launch examples.
 
+## VA-OPD implementation
+
+This fork includes an opt-in implementation of [Visual-Advantage On-Policy Distillation](https://arxiv.org/abs/2605.21924v1). Run `scripts/run_va_opd_qwen3_vl_fsdp.sh` with ordinary full-image multimodal Parquet data. The recipe adds same-size image pixelation, sibling rollout softmax weights, and separately normalized high/low-VA token losses. It reuses V-Zero's sampled reverse-KL estimator.
+
+See [the VA-OPD implementation guide](knowledge/summary_va_opd.md) for formulas, defaults, ablations, data requirements, and reproduction limitations.
+
 ## Annotation
 
 The annotation tools support positive grounding and three negative crop variants:

@@ -45,6 +45,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.evidence_weighting import compute_relative_evidence_opd_weights
 from verl.trainer.distillation.losses import is_distillation_enabled
+from verl.trainer.distillation.visual_advantage import compute_va_opd_weights
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -681,19 +682,35 @@ class RayPPOTrainer:
             raise ValueError("Evidence-weighted OPD requires uid in non_tensor_batch for sibling rollout grouping.")
 
         weight_config = self.distillation_config.evidence_weighting
-        weights, metrics, diagnostics = compute_relative_evidence_opd_weights(
-            teacher_logprobs=batch.batch["teacher_logprobs"],
-            teacher_neg_logprobs=batch.batch["teacher_neg_logprobs"],
-            response_mask=batch.batch["response_mask"],
-            prompt_width=batch.batch["prompts"].shape[1],
-            uids=batch.non_tensor_batch["uid"],
-            gamma=weight_config.gamma,
-            alpha=weight_config.alpha,
-            w_min=weight_config.w_min,
-            w_max=weight_config.w_max,
-            eps=weight_config.eps,
-            return_diagnostics=True,
-        )
+        if weight_config.objective == "va_opd":
+            weights, token_weights, metrics, diagnostics = compute_va_opd_weights(
+                teacher_logprobs=batch.batch["teacher_logprobs"],
+                teacher_neg_logprobs=batch.batch["teacher_neg_logprobs"],
+                response_mask=batch.batch["response_mask"],
+                prompt_width=batch.batch["prompts"].shape[1],
+                uids=batch.non_tensor_batch["uid"],
+                temperature=weight_config.temperature,
+                high_va_fraction=weight_config.high_va_fraction,
+                high_va_weight=weight_config.high_va_weight,
+                eps=weight_config.eps,
+                rollout_reweighting=weight_config.rollout_reweighting,
+                token_grouping=weight_config.token_grouping,
+            )
+            batch.batch["va_token_weights"] = token_weights
+        else:
+            weights, metrics, diagnostics = compute_relative_evidence_opd_weights(
+                teacher_logprobs=batch.batch["teacher_logprobs"],
+                teacher_neg_logprobs=batch.batch["teacher_neg_logprobs"],
+                response_mask=batch.batch["response_mask"],
+                prompt_width=batch.batch["prompts"].shape[1],
+                uids=batch.non_tensor_batch["uid"],
+                gamma=weight_config.gamma,
+                alpha=weight_config.alpha,
+                w_min=weight_config.w_min,
+                w_max=weight_config.w_max,
+                eps=weight_config.eps,
+                return_diagnostics=True,
+            )
         batch.batch["opd_weights"] = weights
         batch.batch["opd_scores"] = diagnostics["scores"]
         batch.batch["opd_advantages"] = diagnostics["advantages"]
