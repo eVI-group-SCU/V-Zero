@@ -5,7 +5,7 @@ import os
 import time
 
 
-def call_ark(args: argparse.Namespace, image_data_url: str, prompt: str) -> str:
+def call_ark(args: argparse.Namespace, image_data_url: str | list[str], prompt: str) -> str:
     from openai import OpenAI
 
     api_key = os.environ.get(args.api_key_env)
@@ -21,10 +21,9 @@ def call_ark(args: argparse.Namespace, image_data_url: str, prompt: str) -> str:
                     {
                         "role": "user",
                         "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": image_data_url},
-                            },
+                            *[{"type": "image_url", "image_url": {"url": url}}
+                              for url in ([image_data_url] if isinstance(image_data_url, str)
+                                          else image_data_url)],
                             {
                                 "type": "text",
                                 "text": prompt,

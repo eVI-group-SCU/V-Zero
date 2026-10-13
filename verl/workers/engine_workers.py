@@ -733,6 +733,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 1. resume rollout memory (weights were released during sleep)
         if self.config.rollout.free_cache_engine:
+            # cuMem allocations in the separate vLLM process cannot reclaim
+            # idle blocks held by the actor's PyTorch caching allocator.
+            aggressive_empty_cache(force_sync=True)
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
