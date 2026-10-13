@@ -1,26 +1,26 @@
-# 标注工具运行指南
+# Annotation Guide
 
-以下命令均在仓库根目录运行。输入图片路径必须在运行机器上可访问。
+Run all commands from the repository root. Input image paths must be accessible on the machine running the scripts.
 
-## 环境与 API 配置
+## Environment and API configuration
 
-激活已安装项目依赖的 Python 环境，并安装标注所需依赖：
+Activate a Python environment with the project dependencies installed, then install the annotation dependencies:
 
 ```bash
 python -m pip install Pillow pyarrow openai tqdm
 ```
 
-首次配置时复制模板；已有 `.seed.env` 时直接编辑该文件：
+For initial setup, copy the template. If `.seed.env` already exists, edit it directly:
 
 ```bash
 cp .seed.env.example .seed.env
 ```
 
-在 `.seed.env` 中填写 `ARK_BASE_URL`、`ARK_MODEL` 和 `ARK_API_KEY`。脚本也支持其他兼容 OpenAI Chat Completions 的视觉模型服务。若密钥存放在其他环境变量中，设置 `ARK_API_KEY_ENV` 为该变量名。密钥文件不要提交到 Git。
+Set `ARK_BASE_URL`, `ARK_MODEL`, and `ARK_API_KEY` in `.seed.env`. The scripts also support vision model services compatible with OpenAI Chat Completions. If the key is stored in another environment variable, set `ARK_API_KEY_ENV` to that variable's name. Do not commit credentials to Git.
 
-命令行可通过 `--base-url`、`--model`、`--api-key-env` 覆盖对应配置。`--api-key-env` 接受环境变量名称，不接受密钥本身。
+Override these settings with `--base-url`, `--model`, and `--api-key-env`. The `--api-key-env` argument takes an environment variable name, not the key itself.
 
-Random / nearby 启动脚本读取 `.project.env`、`.seed.env`，使用当前环境中的 Python；可以用 `PYTHON_BIN` 指定解释器。正 crop 的 `label.sh` 还会读取 `.ssh_server.env` 并激活 Conda 环境：使用 `LABEL_CONDA_ENV` 指定环境名，默认回退到 `SEED_CONDA_ENV`、`FILTER_CONDA_ENV` 或 `verl`；需要时在 `.project.env` 设置 `REMOTE_CONDA_INIT` 来初始化 Conda。
+The random and nearby launchers read `.project.env` and `.seed.env` and use Python from the active environment. Set `PYTHON_BIN` to select an interpreter. The positive crop launcher, `label.sh`, also reads `.ssh_server.env` and activates a Conda environment. Set `LABEL_CONDA_ENV` to its name; the fallback order is `SEED_CONDA_ENV`, `FILTER_CONDA_ENV`, then `verl`. If necessary, set `REMOTE_CONDA_INIT` in `.project.env` to initialize Conda.
 
 ## Positive bbox / point
 
@@ -31,11 +31,11 @@ LABEL_CONDA_ENV=your-env bash annotation/label.sh \
   --limit 10 --workers 4
 ```
 
-输入需要原图及问题。先检查预览标注，再去掉 `--limit` 并使用新的输出目录进行全量标注。使用 `--help` 查看完整参数。
+Input records must contain the original image and question. Inspect the preview annotations, then remove `--limit` and select a new output directory for a full run. Use `--help` to list all arguments.
 
-## Random / nearby negative crop
+## Random / nearby negative crops
 
-输入为一个 Parquet 文件，需要包含原图、问题和 `teacher_images` 中的一个 positive crop。负 crop 的宽高以 positive 图片的实际像素尺寸为准。
+Provide one Parquet file containing the original image, question, and exactly one positive crop in `teacher_images` per record. The negative crop dimensions are determined by the positive image's actual pixel dimensions.
 
 ```bash
 bash annotation/label_random_negative.sh \
@@ -49,7 +49,7 @@ bash annotation/label_nearby_negative.sh \
   --limit 10 --workers 4
 ```
 
-`--workers` 控制每个进程的 API 并发数。两个入口同时运行时，并发数相加。全量运行示例：
+`--workers` sets API concurrency per process. Concurrent runs add to the total concurrency. For a full run:
 
 ```bash
 bash annotation/label_nearby_negative.sh \
@@ -58,17 +58,17 @@ bash annotation/label_nearby_negative.sh \
   --workers 64
 ```
 
-Random 表示由模型选择无关区域，不是均匀随机采样。Nearby 要求模型选择 positive 周边区域。两者均向标注模型提供原图、positive crop 和问题，并要求输出同尺寸负框及框内 point。
+Random annotation asks the model to select an unrelated region; it does not sample regions uniformly at random. Nearby annotation asks for a region immediately beside the positive crop. Both provide the original image, positive crop, and question to the model and request a negative box with the same pixel dimensions and a point inside it.
 
-默认保存裁剪图片，并在全部选中行成功后导出 `train.parquet`，仅替换或新增 `teacher_neg_images`。使用 `--limit` 时，导出的文件只包含选中行，不能当作全量数据。
+By default, the scripts save crop images and export `train.parquet` once every selected record succeeds. Only `teacher_neg_images` is replaced or added. When using `--limit`, the exported file contains only the selected records and is not a full dataset.
 
-断点续跑默认开启：使用完全相同的命令和输出目录，跳过成功且裁图存在的记录，重试失败记录。改变输入、参数或从预览切换到全量时使用新目录。存在失败行时不会导出完整训练文件，应查看 `grounding.jsonl` 的 `error` 和 `summary.json`。
+Resume is enabled by default. Repeat the exact command with the same output directory to skip successful records whose crop files exist and retry failed records. Use a new directory when changing inputs or parameters, including switching from a preview to a full run. Failed records prevent training Parquet export; inspect `error` in `grounding.jsonl` and the counts in `summary.json`.
 
-只保存标注记录可加 `--no-write-train-parquet`；若还要保存裁图，再加 `--save-crops`。坐标约定、几何校验和输出字段见 [负 crop 说明](NEGATIVE_CROPS.md)。
+Use `--no-write-train-parquet` to save annotation records without exporting training data. Add `--save-crops` to also save crop images. See [negative crop details](NEGATIVE_CROPS.md) for coordinates, geometric validation, and output fields.
 
-## Black negative crop
+## Black negative crops
 
-此入口无需 API。输入必须包含 `images`、`teacher_images`、`teacher_neg_images`，且图片使用可访问的本地路径。每行要求一个 positive crop。
+This entry point requires no API. Input must contain `images`, `teacher_images`, and `teacher_neg_images`, with accessible local image paths and exactly one positive crop per record.
 
 ```bash
 python -m annotation.black_crops \
@@ -76,4 +76,4 @@ python -m annotation.black_crops \
   --output-dir results/black-negative
 ```
 
-生成与 positive 同尺寸的纯黑 RGB PNG；相同尺寸共享图片。输出 `train.parquet`、`crops/` 和 `manifest.json`，仅修改 `teacher_neg_images`，并校验其他列保持一致。此入口没有断点续跑参数，请使用独立输出目录。
+The script generates pure black RGB PNGs matching the positive crop dimensions. Records with the same dimensions share an image. Outputs are `train.parquet`, `crops/`, and `manifest.json`. Only `teacher_neg_images` changes; all other columns are checked for equality. This entry point has no resume option; use a separate output directory.
