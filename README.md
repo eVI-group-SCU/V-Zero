@@ -41,7 +41,7 @@ uv pip install -e . --no-deps
 
 The V-Zero training implementation is included under [`verl/`](verl/), with the public launcher in [`scripts/run_vzero_qwen35_vl_fsdp.sh`](scripts/run_vzero_qwen35_vl_fsdp.sh). It configures the on-policy distillation recipe with teacher replay, positive/negative evidence crops, and evidence-gated token distillation.
 
-See [`scripts/README.md`](scripts/README.md) for data schema, environment variables, and launch examples.
+The main training entry defaults to the complete FA3 retraining workflow. Run `--prepare` once, then `--launch` on each allocated node; select `FA3_PROFILE=four_b`, `four_b_boundary`, or `nine_b`. See [`scripts/README.md`](scripts/README.md) for the required shared runtime, data schema, configuration and launch commands.
 
 ## Annotation
 
