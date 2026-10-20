@@ -1,24 +1,33 @@
-"""Isolated, opt-in placement and evidence hooks. Never import on production entry."""
-import json
+"""FA3-only placement, teacher timeout, and actual-kernel execution checks."""
+
 import functools
 import importlib
 import importlib.util
 import inspect
+import json
 import math
 import numbers
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
 import socket
 import sys
 import time
+from pathlib import Path
+
+NNODES = int(os.environ.get("VZERO_FA3_NNODES", "2"))
+CPUS_PER_NODE = int(os.environ.get("VZERO_FA3_CPUS_PER_NODE", "184"))
+if NNODES not in (2, 4) or CPUS_PER_NODE < 16:
+    raise ValueError("FA3 requires 2 or 4 nodes and at least 16 allocated CPUs per node")
+GPUS_PER_NODE = 8
+POOL_SHAPE = (4,) * NNODES
+ACTOR_WORLD_SIZE = sum(POOL_SHAPE)
 
 
 def wandb_environment(env):
     # Read only literal W&B exports, never execute the training script or publish its key.
-    source = Path(env["DLC_WANDB_ENV_FILE"])
+    source = Path(env["VZERO_FA3_WANDB_ENV_FILE"])
     require(source.is_absolute() and source.is_file(), "W&B export source is missing")
     settings = {}
     allowed = {"WANDB_BASE_URL", "WANDB_API_KEY", "WANDB_ENTITY", "WANDB_PROJECT"}
@@ -28,38 +37,70 @@ def wandb_environment(env):
         parts = shlex.split(line, comments=True)
         require(len(parts) == 2, "W&B exports must be literal assignments")
         key, _, value = parts[1].partition("=")
-        require(key in allowed and value and "$" not in value and "`" not in value,
-                "W&B exports must contain literal nonempty values")
+        require(
+            key in allowed and value and "$" not in value and "`" not in value,
+            "W&B exports must contain literal nonempty values",
+        )
         settings[key] = value
-    require(all(settings.get(key) for key in ("WANDB_BASE_URL", "WANDB_API_KEY")),
-            "The source must export W&B base URL and API key")
+    require(
+        all(settings.get(key) for key in ("WANDB_BASE_URL", "WANDB_API_KEY")),
+        "The source must export W&B base URL and API key",
+    )
     from urllib.parse import urlsplit
+
     url = urlsplit(settings["WANDB_BASE_URL"])
-    require(url.scheme == "https" and url.hostname and not url.username and not url.password,
-            "Require an HTTPS W&B server URL without embedded credentials")
-    settings.update(WANDB_MODE="online", WANDB_RESUME="never", WANDB_INIT_TIMEOUT="120",
-                    WANDB_DIR=str(Path(env["DLC_TRAIN_OUTPUT_DIR"]) / "wandb"))
+    require(
+        url.scheme == "https" and url.hostname and not url.username and not url.password,
+        "Require an HTTPS W&B server URL without embedded credentials",
+    )
+    settings.update(
+        WANDB_MODE="online",
+        WANDB_RESUME="never",
+        WANDB_INIT_TIMEOUT="120",
+        WANDB_DIR=str(Path(env["VZERO_FA3_TRAIN_OUTPUT_DIR"]) / "wandb"),
+    )
     return settings
 
 
 def wandb_preflight(env):
     import requests
+
     settings = wandb_environment(env)
-    try:
-        response = requests.post(settings["WANDB_BASE_URL"].rstrip("/") + "/graphql",
-                                 auth=("api", settings["WANDB_API_KEY"]),
-                                 json={"query": "query { viewer { username } }"}, timeout=20)
-        valid = response.ok and bool(response.json().get("data", {}).get("viewer", {}).get("username"))
-    except Exception:
-        raise RuntimeError("W&B authentication/connectivity preflight failed; credentials withheld") from None
-    require(valid, "W&B server rejected authentication; credentials withheld")
-    return {"authenticated": True, "base_url": settings["WANDB_BASE_URL"], "mode": settings["WANDB_MODE"]}
+    for attempt in range(1, 6):
+        try:
+            response = requests.post(
+                settings["WANDB_BASE_URL"].rstrip("/") + "/graphql",
+                auth=("api", settings["WANDB_API_KEY"]),
+                json={"query": "query { viewer { username } }"},
+                timeout=20,
+            )
+            require(response.status_code not in {401, 403}, "W&B authentication rejected; credentials withheld")
+            valid = response.ok and bool(response.json().get("data", {}).get("viewer", {}).get("username"))
+            if valid:
+                return {
+                    "authenticated": True,
+                    "base_url": settings["WANDB_BASE_URL"],
+                    "mode": settings["WANDB_MODE"],
+                    "attempts": attempt,
+                }
+            reason = "HTTP_" + str(response.status_code)
+        except (requests.RequestException, json.JSONDecodeError) as error:
+            reason = type(error).__name__
+        print(f"WANDB_PREFLIGHT_RETRY attempt={attempt}/5 reason={reason}", flush=True)
+        if attempt < 5:
+            time.sleep(5)
+    raise RuntimeError("W&B connectivity preflight exhausted five attempts; credentials withheld")
 
 
 def attach_teacher_with_timeout(original, trainer, batch, future, timing_raw, output, timeout=600):
     started = time.monotonic()
-    record = {"step": trainer.global_steps, "stage": "teacher_wait", "timeout_seconds": timeout,
-              "started_unix": time.time(), "status": "start"}
+    record = {
+        "step": trainer.global_steps,
+        "stage": "teacher_wait",
+        "timeout_seconds": timeout,
+        "started_unix": time.time(),
+        "status": "start",
+    }
 
     def mark(status):
         record.update(status=status, elapsed_seconds=time.monotonic() - started, updated_unix=time.time())
@@ -75,7 +116,9 @@ def attach_teacher_with_timeout(original, trainer, batch, future, timing_raw, ou
         result = original(trainer, batch, BoundedFuture() if future is not None else None, timing_raw)
     except TimeoutError as error:
         mark("timeout")
-        raise TimeoutError(f"Teacher future exceeded {timeout}s at step {trainer.global_steps}; no retry/resume") from error
+        raise TimeoutError(
+            f"Teacher future exceeded {timeout}s at step {trainer.global_steps}; no retry/resume"
+        ) from error
     except BaseException:
         mark("error")
         raise
@@ -97,26 +140,30 @@ def write_json(path, value):
 
 def select_nodes(nodes):
     nodes = sorted((n for n in nodes if n.get("Alive")), key=lambda n: n["NodeManagerAddress"])
-    require(len(nodes) == 2, "Exactly two live Ray nodes are required; no shared/existing cluster")
-    require(len({n["NodeID"] for n in nodes}) == 2, "Duplicate Ray node IDs")
-    require(len({n["NodeManagerAddress"] for n in nodes}) == 2, "Nodes must have distinct addresses")
+    require(
+        len(nodes) == NNODES, "Exactly the configured number of live Ray nodes is required; no shared/existing cluster"
+    )
+    require(len({n["NodeID"] for n in nodes}) == NNODES, "Duplicate Ray node IDs")
+    require(len({n["NodeManagerAddress"] for n in nodes}) == NNODES, "Nodes must have distinct addresses")
     for node in nodes:
         resources = node["Resources"]
-        require(resources.get("GPU") == 8 and resources.get("CPU") == 184,
-                "Each Ray node must expose the approved 184 CPU / 8 GPU allocation")
+        require(
+            resources.get("GPU") == GPUS_PER_NODE and resources.get("CPU") == CPUS_PER_NODE,
+            "Each Ray node must expose the configured CPU / 8 GPU allocation",
+        )
         key = "node:" + node["NodeManagerAddress"]
         require(resources.get(key, 0) >= 0.008, "Missing Ray built-in node affinity resource")
-        require(sum(other["Resources"].get(key, 0) > 0 for other in nodes) == 1,
-                "Node affinity resource is not unique")
+        require(sum(other["Resources"].get(key, 0) > 0 for other in nodes) == 1, "Node affinity resource is not unique")
     return nodes
 
 
 def pinned_bundles(pool, node):
     require(pool.name_prefix in {"global_pool", "teacher_pool"}, "Unexpected resource pool")
-    require(list(pool._store) == [4, 4] and pool.use_gpu and not pool.detached,
-            "Only non-detached GPU pools [4,4] are supported")
-    bundle = {"CPU": pool.max_colocate_count, "GPU": 1,
-              "node:" + node["NodeManagerAddress"]: 0.001}
+    require(
+        tuple(pool._store) == POOL_SHAPE and pool.use_gpu and not pool.detached,
+        "GPU pool shape must match the configured topology",
+    )
+    bundle = {"CPU": pool.max_colocate_count, "GPU": 1, "node:" + node["NodeManagerAddress"]: 0.001}
     if pool.accelerator_type is not None:
         bundle[pool.accelerator_type] = 0.0001
     return [bundle.copy() for _ in range(4)]
@@ -125,14 +172,17 @@ def pinned_bundles(pool, node):
 def verify_assignment(table, expected_id):
     assignments = table.get("bundles_to_node_id", {})
     require(table.get("state") == "CREATED", "Placement group was not created")
-    require(len(assignments) == 4 and set(assignments.values()) == {expected_id},
-            "Placement audit failed: four bundles must be on their explicit target node")
+    require(
+        len(assignments) == 4 and set(assignments.values()) == {expected_id},
+        "Placement audit failed: four bundles must be on their explicit target node",
+    )
     return {str(index): node_id for index, node_id in assignments.items()}
 
 
 def install_placement(output_dir):
     import ray
     from ray.util.placement_group import placement_group, placement_group_table
+
     from verl.single_controller.ray.base import RayResourcePool, ResourcePoolManager
 
     nodes = select_nodes(ray.nodes())
@@ -143,26 +193,34 @@ def install_placement(output_dir):
         if pool.pgs is not None:
             return pool.pgs
         require(strategy == "STRICT_PACK" and device_name == "cuda", "Unexpected placement contract")
-        pgs = [placement_group(pinned_bundles(pool, node), strategy="STRICT_PACK",
-                               name=f"{pool.name_prefix}-explicit-{index}")
-               for index, node in enumerate(nodes)]
+        pgs = [
+            placement_group(
+                pinned_bundles(pool, node), strategy="STRICT_PACK", name=f"{pool.name_prefix}-explicit-{index}"
+            )
+            for index, node in enumerate(nodes)
+        ]
         ray.get([pg.ready() for pg in pgs], timeout=120)
         audit["pools"][pool.name_prefix] = [
             {"node_id": node["NodeID"], "bundles": verify_assignment(placement_group_table(pg), node["NodeID"])}
-            for pg, node in zip(pgs, nodes)
+            for pg, node in zip(pgs, nodes, strict=True)
         ]
         write_json(Path(output_dir) / "placement.json", audit)
         pool.pgs = pgs
         return pgs
 
     def create_pools(manager):
-        require(manager.resource_pool_spec == {"global_pool": [4, 4], "teacher_pool": [4, 4]},
-                "Unexpected pool topology; refusing to change global batch for divisibility")
+        require(
+            manager.resource_pool_spec == {"global_pool": list(POOL_SHAPE), "teacher_pool": list(POOL_SHAPE)},
+            "Unexpected pool topology; refusing to change global batch for divisibility",
+        )
         original_create(manager)
         # Reserve and audit both pools before any model initialization.
         for pool in manager.resource_pool_dict.values():
             pool.get_placement_groups()
-        print("SMOKE_PLACEMENT_OK actor=[4,4] teacher=[4,4] actor_world_size=8", flush=True)
+        print(
+            f"PLACEMENT_OK actor={list(POOL_SHAPE)} teacher={list(POOL_SHAPE)} actor_world_size={ACTOR_WORLD_SIZE}",
+            flush=True,
+        )
 
     RayResourcePool.get_placement_groups = get_groups
     ResourcePoolManager.create_resource_pool = create_pools
@@ -171,29 +229,40 @@ def install_placement(output_dir):
 def checkpoint_space(path, checkpoint_bytes, minimum_free_gib):
     require(checkpoint_bytes > 0, "Missing model-only checkpoint size estimate")
     free = shutil.disk_usage(path).free
-    # Both arms can write together; retain headroom beyond two concurrent model writes.
+    # Retain the previous two-write safety margin on the shared filesystem.
     required = max(int(minimum_free_gib * 2**30), 2 * checkpoint_bytes + 8 * 2**30)
-    result = {"free_bytes": free, "required_free_bytes": required,
-              "estimated_checkpoint_bytes": checkpoint_bytes,
-              "estimated_all_20_model_checkpoints_bytes": checkpoint_bytes * 20,
-              "estimate_basis": "2x base safetensors bytes for FP32 FSDP model shards; excludes small metadata",
-              "retention": "all_ten_per_arm_no_deletion"}
+    result = {
+        "free_bytes": free,
+        "required_free_bytes": required,
+        "estimated_checkpoint_bytes": checkpoint_bytes,
+        "estimate_basis": "2x base safetensors bytes for FP32 FSDP model shards; excludes small metadata",
+        "retention": "all_scheduled_checkpoints_no_deletion",
+    }
     require(free >= required, f"Checkpoint disk gate: free={free} required={required}; no files deleted")
     return result
 
 
 def checkpoint_files(path):
     path = Path(path)
-    models = sorted(path.glob("actor/model_world_size_8_rank_*.pt"))
-    expected = {f"model_world_size_8_rank_{rank}.pt" for rank in range(8)}
-    require({p.name for p in models} == expected and all(p.stat().st_size > 0 for p in models),
-            "Checkpoint missing one or more of the eight model shards")
-    forbidden = [p for p in path.rglob("*") if p.is_file() and
-                 (p.name.startswith(("optim_", "extra_state_", "pytorch_model")) or p.suffix == ".safetensors")]
+    models = sorted(path.glob("actor/model_world_size_*_rank_*.pt"))
+    expected = {f"model_world_size_{ACTOR_WORLD_SIZE}_rank_{rank}.pt" for rank in range(ACTOR_WORLD_SIZE)}
+    require(
+        {p.name for p in models} == expected and all(p.stat().st_size > 0 for p in models),
+        "Checkpoint must contain all configured actor model shards",
+    )
+    forbidden = [
+        p
+        for p in path.rglob("*")
+        if p.is_file()
+        and (p.name.startswith(("optim_", "extra_state_", "pytorch_model")) or p.suffix == ".safetensors")
+    ]
     require(not forbidden, f"Unexpected optimizer/extra/HF weights in model-only checkpoint: {forbidden}")
-    return {"model_files": [str(p.relative_to(path)) for p in models],
-            "model_bytes": sum(p.stat().st_size for p in models),
-            "small_metadata_allowed": True, "optimizer_or_extra": False}
+    return {
+        "model_files": [str(p.relative_to(path)) for p in models],
+        "model_bytes": sum(p.stat().st_size for p in models),
+        "small_metadata_allowed": True,
+        "optimizer_or_extra": False,
+    }
 
 
 def callable_target(target):
@@ -213,20 +282,27 @@ def load_fa3_provider(controls):
     require(re.fullmatch(r"kernels-community/flash-attn3@[0-9a-f]{40}", selector), "Pinned FA3 provider required")
     require(os.environ.get("HF_HUB_OFFLINE") == "1", "Provider must load offline from the shared cache")
     from huggingface_hub import constants
+
     require(constants.HF_HUB_OFFLINE, "HF was imported before the offline environment was applied")
     from kernels import get_kernel
+
     repo, revision = selector.split("@")
     module = get_kernel(repo, revision=revision)
     source = Path(module.__file__).resolve()
-    require(any(source.is_relative_to(Path(path).resolve()) for path in controls["caches"].values()),
-            "FA3 provider did not load from the supplied shared cache")
+    require(
+        any(source.is_relative_to(Path(path).resolve()) for path in controls["caches"].values()),
+        "FA3 provider did not load from the supplied shared cache",
+    )
     return {"selector": selector, "module": module.__name__, "source": str(source)}
 
 
 def setup_boundary(controls):
-    require(os.environ.get("SHX_PACKED_BOUNDARY_ARM") == controls["arm"]
-            and os.environ.get("SHX_PACKED_AUDIT_DIR") == controls["audit_dir"], "Boundary child env mismatch")
-    name = "shx_packed_boundary"
+    require(
+        os.environ.get("VZERO_PACKED_BOUNDARY_ARM") == controls["arm"]
+        and os.environ.get("VZERO_PACKED_AUDIT_DIR") == controls["audit_dir"],
+        "Boundary child env mismatch",
+    )
+    name = "vzero_packed_boundary"
     require(name not in sys.modules, "Boundary module already loaded outside the isolated actor setup")
     spec = importlib.util.spec_from_file_location(name, controls["boundary_module"])
     require(spec is not None and spec.loader is not None, "Cannot load supplied boundary module")
@@ -241,49 +317,83 @@ def boundary_evidence(audit_dir, arm, rank, pid, hostname):
     path = Path(audit_dir) / f"actor-{hostname}-{pid}-rank{rank}.jsonl"
     require(path.is_file(), f"No actual boundary engine evidence: {path}")
     records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    require(all(record["api"] == 1 and record["arm"] == arm and record["rank"] == rank
-                and record["pid"] == pid for record in records), "Wrong boundary audit identity/API")
+    require(
+        all(
+            record["api"] == 1 and record["arm"] == arm and record["rank"] == rank and record["pid"] == pid
+            for record in records
+        ),
+        "Wrong boundary audit identity/API",
+    )
     events = {record["event"] for record in records}
     require("audit_failure" not in events, "Boundary audit reported a failure")
-    require({"actor_engine_installed", "model_wrapped", "backward_batch_complete"} <= events,
-            "Boundary hook installation alone is not successful backward evidence")
+    require(
+        {"actor_engine_installed", "model_wrapped", "backward_batch_complete"} <= events,
+        "Boundary hook installation alone is not successful backward evidence",
+    )
     guards = [record for record in records if record["event"] == "packed_guard" and record["mode"] == "train"]
-    require(guards and all(record["position_shape"] == [4, 1, record["total_tokens"]] for record in guards),
-            "Actual training packed-position guard did not pass")
+    require(
+        guards and all(record["position_shape"] == [4, 1, record["total_tokens"]] for record in guards),
+        "Actual training packed-position guard did not pass",
+    )
     kernels = [record for record in records if record["event"] == "kernel_args" and record["mode"] == "train"]
     expected = {(phase, kind) for phase in ("forward", "recompute") for kind in ("conv", "gdn")}
-    require({(record["phase"], record["kernel"]) for record in kernels} == expected,
-            "Missing actual convolution/GDN forward or checkpoint-recompute calls")
+    require(
+        {(record["phase"], record["kernel"]) for record in kernels} == expected,
+        "Missing actual convolution/GDN forward or checkpoint-recompute calls",
+    )
     require(all(record["present"] == (arm == "boundary") for record in kernels), "Boundary injection arm mismatch")
-    return {"audit_file": str(path), "packed_position_checks": len(guards),
-            "boundary_installed": arm == "boundary", "boundary_calls": len(kernels) if arm == "boundary" else 0,
-            "boundary_setup": True, "boundary_evidence_scope": "first_completed_backward_batch; module checks every batch"}
+    return {
+        "audit_file": str(path),
+        "packed_position_checks": len(guards),
+        "boundary_installed": arm == "boundary",
+        "boundary_calls": len(kernels) if arm == "boundary" else 0,
+        "boundary_setup": True,
+        "boundary_evidence_scope": "first_completed_backward_batch; module checks every batch",
+    }
 
 
 def verify_actor_evidence(output, arm, minimum_calls=1):
     records = []
-    for rank in range(8):
+    for rank in range(ACTOR_WORLD_SIZE):
         path = Path(output) / f"actor-runtime-rank-{rank}.json"
         require(path.is_file(), f"Missing actual actor runtime evidence for rank {rank}")
         record = json.loads(path.read_text())
         require(record["rank"] == rank and record["arm"] == arm, "Wrong rank/arm evidence")
-        require(record["training_calls"] >= minimum_calls and record["fa3_forward"] > 0 and record["fa3_backward"] > 0,
-                f"Rank {rank} lacks successful training FA3 forward/backward calls")
+        require(
+            record["training_calls"] >= minimum_calls and record["fa3_forward"] > 0 and record["fa3_backward"] > 0,
+            f"Rank {rank} lacks successful training FA3 forward/backward calls",
+        )
         require(record["packed_position_checks"] > 0, f"Rank {rank} never entered the input guard")
-        require(record["boundary_setup"] and record["boundary_installed"] == (arm == "boundary"), "Boundary hook arm mismatch")
-        require(arm == "baseline" or record["boundary_calls"] > 0,
-                f"Rank {rank} installed the boundary hook but never called it")
+        require(
+            record["boundary_setup"] and record["boundary_installed"] == (arm == "boundary"),
+            "Boundary hook arm mismatch",
+        )
+        require(
+            arm == "baseline" or record["boundary_calls"] > 0,
+            f"Rank {rank} installed the boundary hook but never called it",
+        )
         records.append(record)
     return records
 
 
 def install_actor_hooks(output, controls):
-    require(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "0" and os.environ.get("FLA_TILELANG") == "1",
-            "Approved FLA flags must precede actor imports")
+    require(
+        os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "0" and os.environ.get("FLA_TILELANG") == "1",
+        "Approved FLA flags must precede actor imports",
+    )
     provider = load_fa3_provider(controls)
-    state = {"active": False, "training_calls": 0, "fa3_forward": 0, "fa3_backward": 0,
-             "packed_position_checks": 0, "boundary_installed": False, "boundary_calls": 0,
-             "arm": controls["arm"], "fa3_provider": provider, "fa3_targets": {}}
+    state = {
+        "active": False,
+        "training_calls": 0,
+        "fa3_forward": 0,
+        "fa3_backward": 0,
+        "packed_position_checks": 0,
+        "boundary_installed": False,
+        "boundary_calls": 0,
+        "arm": controls["arm"],
+        "fa3_provider": provider,
+        "fa3_targets": {},
+    }
 
     def instrument(target, counter):
         owner, name, original = callable_target(target)
@@ -306,7 +416,9 @@ def install_actor_hooks(output, controls):
     instrument(controls["fa3_backward_target"], "fa3_backward")
     setup_boundary(controls)
     import torch
+
     from verl.workers.engine_workers import TrainingWorker
+
     require(not getattr(TrainingWorker.train_mini_batch, "_v3_instrumented", False), "Actor hooks already installed")
     original_train = TrainingWorker.train_mini_batch
 
@@ -321,10 +433,14 @@ def install_actor_hooks(output, controls):
         state["training_calls"] += 1
         state["rank"] = torch.distributed.get_rank()
         state["hostname"] = socket.gethostname()
-        state.update(boundary_evidence(controls["audit_dir"], controls["arm"], state["rank"], os.getpid(), state["hostname"]))
+        state.update(
+            boundary_evidence(controls["audit_dir"], controls["arm"], state["rank"], os.getpid(), state["hostname"])
+        )
         write_json(Path(output) / f"actor-runtime-rank-{state['rank']}.json", state)
-        require(all(state[key] > value for key, value in zip(
-            ("fa3_forward", "fa3_backward"), before)), "Actor update returned without actual FA3 forward/backward calls")
+        require(
+            all(state[key] > value for key, value in zip(("fa3_forward", "fa3_backward"), before, strict=True)),
+            "Actor update returned without actual FA3 forward/backward calls",
+        )
         if state["training_calls"] == 1:
             print("ACTOR_RUNTIME_VERIFIED " + json.dumps(state), flush=True)
         return result
@@ -337,16 +453,20 @@ def install_actor_hooks(output, controls):
 def task_runner_class(output_dir, prepared, baseline):
     import ray
     from omegaconf import OmegaConf
+
     from verl.trainer.main_ppo import TaskRunner
     from verl.trainer.ppo.ray_trainer import RayPPOTrainer
     from verl.utils.tracking import Tracking
 
     output = Path(output_dir)
     controls = prepared["experiment"]
+    steps, save_freq = controls["steps"], controls["save_freq"]
+    checkpoint_steps = sorted(set(range(save_freq, steps + 1, save_freq)) | {steps})
 
     class ExperimentTaskRunner(TaskRunner):
         def add_actor_rollout_worker(self, config):
             from verl.workers import engine_workers
+
             original = engine_workers.ActorRolloutRefWorker
 
             class InstrumentedActor(original):
@@ -379,51 +499,88 @@ def task_runner_class(output_dir, prepared, baseline):
                 original_tracking_init(tracker, *args, **kwargs)
                 run = tracker.logger["wandb"].run
                 require(run is not None and run.settings.mode == "online", "Expected a live online W&B run")
-                write_json(output / "wandb-run.json", {"id": run.id, "name": run.name,
-                           "project": run.project, "entity": run.entity, "url": run.url,
-                           "mode": run.settings.mode, "dir": run.dir})
+                write_json(
+                    output / "wandb-run.json",
+                    {
+                        "id": run.id,
+                        "name": run.name,
+                        "project": run.project,
+                        "entity": run.entity,
+                        "url": run.url,
+                        "mode": run.settings.mode,
+                        "dir": run.dir,
+                    },
+                )
 
             def init_workers(trainer):
-                require(trainer.total_training_steps == 100 and not trainer.use_critic, "Expected 100-step actor-only OPD")
+                require(
+                    trainer.total_training_steps == steps and not trainer.use_critic,
+                    "Unexpected actor-only OPD step budget",
+                )
                 optim = trainer.config.actor_rollout_ref.actor.optim
-                require(optim.total_training_steps == 100 and optim.lr == 1e-6 and optim.lr_scheduler_type == "constant",
-                        "Unexpected optimizer horizon/LR; no schedule repair or silent changes")
-                require(optim.lr_warmup_steps in {-1, 0} and optim.lr_warmup_steps_ratio == 0, "Warmup must remain zero")
+                require(
+                    optim.total_training_steps == steps and optim.lr == 1e-6 and optim.lr_scheduler_type == "constant",
+                    "Unexpected optimizer horizon/LR; no schedule repair or silent changes",
+                )
+                require(
+                    optim.lr_warmup_steps in {-1, 0} and optim.lr_warmup_steps_ratio == 0, "Warmup must remain zero"
+                )
                 baseline_steps = baseline["trainer"]["total_training_steps"]
                 if baseline_steps is None:
                     baseline_steps = len(trainer.train_dataloader) * baseline["trainer"]["total_epochs"]
-                write_json(output / "schedule.json", {"trainer_stop_steps": 100, "optimizer_horizon": 100,
-                    "baseline_horizon": baseline_steps, "lr": 1e-6, "scheduler": "constant", "warmup_steps": 0,
-                    "note": "100-step horizon chosen for both fresh arms; constant/zero-warmup LR unchanged"})
+                write_json(
+                    output / "schedule.json",
+                    {
+                        "trainer_stop_steps": steps,
+                        "optimizer_horizon": steps,
+                        "baseline_horizon": baseline_steps,
+                        "lr": 1e-6,
+                        "scheduler": "constant",
+                        "warmup_steps": 0,
+                        "note": "Batch32/mini16, n8; fresh FA3 run, constant schedule, zero warmup",
+                    },
+                )
                 write_json(output / "runtime_config.json", OmegaConf.to_container(trainer.config, resolve=True))
                 return original_init(trainer)
 
             def teacher(trainer, batch, future, timing_raw):
                 result = attach_teacher_with_timeout(original_teacher, trainer, batch, future, timing_raw, output)
-                require("teacher_logprobs" in result.batch and "teacher_neg_logprobs" in result.batch,
-                        "Both positive and negative teacher results are required")
+                require(
+                    "teacher_logprobs" in result.batch and "teacher_neg_logprobs" in result.batch,
+                    "Both positive and negative teacher results are required",
+                )
                 counts["teacher"] += 1
                 write_json(output / "stages.json", counts)
                 return result
 
             def update(trainer, batch):
-                require(trainer.global_steps == counts["update"] + 1 <= 100, "Unexpected training step or budget overrun")
+                require(
+                    trainer.global_steps == counts["update"] + 1 <= steps, "Unexpected training step or budget overrun"
+                )
                 require(len(batch) == 256, "Expected B32 x n8; never resize the global batch")
                 result = original_update(trainer, batch)
                 counts["update"] += 1
                 verify_actor_evidence(output, controls["arm"], counts["update"])
                 write_json(output / "stages.json", counts)
-                print(f"ACTOR_UPDATE_VERIFIED step={trainer.global_steps} fa3_ranks=8", flush=True)
+                print(f"ACTOR_UPDATE_VERIFIED step={trainer.global_steps} fa3_ranks={ACTOR_WORLD_SIZE}", flush=True)
                 return result
 
             def save(trainer):
                 step = trainer.global_steps
-                require(step in range(10, 101, 10) and step not in counts["checkpoints"], "Unexpected/duplicate checkpoint step")
+                require(
+                    step in checkpoint_steps and step not in counts["checkpoints"],
+                    "Unexpected/duplicate checkpoint step",
+                )
                 actor = trainer.config.actor_rollout_ref.actor
-                require(list(actor.checkpoint.save_contents) == ["model"] and not actor.checkpoint.get("async_save", False),
-                        "Only synchronous model shards may be saved; no optimizer/extra")
-                require(trainer.config.trainer.max_actor_ckpt_to_keep is None
-                        and not trainer.config.trainer.remove_previous_ckpt_in_save, "Automatic deletion is forbidden")
+                require(
+                    list(actor.checkpoint.save_contents) == ["model"] and not actor.checkpoint.get("async_save", False),
+                    "Only synchronous model shards may be saved; no optimizer/extra",
+                )
+                require(
+                    trainer.config.trainer.max_actor_ckpt_to_keep is None
+                    and not trainer.config.trainer.remove_previous_ckpt_in_save,
+                    "Automatic deletion is forbidden",
+                )
                 space = checkpoint_space(output, prepared["checkpoint_estimate_bytes"], controls["minimum_free_gib"])
                 write_json(output / "checkpoint-space-latest.json", dict(space, step=step))
                 result = original_save(trainer)
@@ -436,11 +593,18 @@ def task_runner_class(output_dir, prepared, baseline):
             def log(tracker, data, step, *args, **kwargs):
                 result = original_log(tracker, data, step, *args, **kwargs)
                 if "training/global_step" in data:
-                    require(step == len(counts["logged_steps"]) + 1 <= 100, "Unexpected logged training step")
+                    require(step == len(counts["logged_steps"]) + 1 <= steps, "Unexpected logged training step")
                     counts["logged_steps"].append(step)
-                    record = {"step": step, "arm": controls["arm"], "metrics": data,
-                              "nonfinite_metric_keys": [key for key, value in data.items()
-                                  if isinstance(value, numbers.Real) and not math.isfinite(value)]}
+                    record = {
+                        "step": step,
+                        "arm": controls["arm"],
+                        "metrics": data,
+                        "nonfinite_metric_keys": [
+                            key
+                            for key, value in data.items()
+                            if isinstance(value, numbers.Real) and not math.isfinite(value)
+                        ],
+                    }
                     write_json(output / "updates" / f"step-{step:03d}.json", record)
                     write_json(output / "update_result.json", record)
                 return result
@@ -452,11 +616,25 @@ def task_runner_class(output_dir, prepared, baseline):
             Tracking.log = log
             Tracking.__init__ = tracking_init
             super().run(config)
-            require(counts == {"teacher": 100, "update": 100, "logged_steps": list(range(1, 101)),
-                               "checkpoints": list(range(10, 101, 10))}, "Incomplete training/checkpoint history")
-            evidence = verify_actor_evidence(output, controls["arm"], 100)
-            write_json(output / "training_complete.json", {"counts": counts, "arm": controls["arm"],
-                       "actual_fa3_ranks": len(evidence), "precision_pass": False})
-            print("TRAINING_COMPLETE steps=100 model_checkpoints=10 actual_fa3_ranks=8 precision_pass=false", flush=True)
+            require(
+                counts
+                == {
+                    "teacher": steps,
+                    "update": steps,
+                    "logged_steps": list(range(1, steps + 1)),
+                    "checkpoints": checkpoint_steps,
+                },
+                "Incomplete training/checkpoint history",
+            )
+            evidence = verify_actor_evidence(output, controls["arm"], steps)
+            write_json(
+                output / "training_complete.json",
+                {"counts": counts, "arm": controls["arm"], "actual_fa3_ranks": len(evidence), "precision_pass": False},
+            )
+            print(
+                f"TRAINING_COMPLETE steps={steps} model_checkpoints={len(checkpoint_steps)} "
+                f"actual_fa3_ranks={ACTOR_WORLD_SIZE} precision_pass=false",
+                flush=True,
+            )
 
     return ray.remote(num_cpus=1)(ExperimentTaskRunner)

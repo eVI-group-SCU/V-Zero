@@ -31,6 +31,19 @@ if [[ -n "${CUDA_HOME:-}" ]]; then
     export LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64${LIBRARY_PATH:+:${LIBRARY_PATH}}"
 fi
 
+# Config capture re-enters this file to obtain the standard Hydra recipe.
+VZERO_TRAIN_BACKEND=${VZERO_TRAIN_BACKEND:-fa3}
+case "${VZERO_TRAIN_BACKEND}" in
+    fa3)
+        if [[ "${VZERO_CONFIG_CAPTURE:-0}" != 1 ]]; then
+            export VERL_REPO_ROOT
+            exec bash "${SCRIPT_DIR}/fa3/run.sh" "$@"
+        fi
+        ;;
+    fa2) ;;
+    *) echo "VZERO_TRAIN_BACKEND must be fa3 or fa2" >&2; exit 2 ;;
+esac
+
 export FLA_DISABLE_BACKEND_DISPATCH=${FLA_DISABLE_BACKEND_DISPATCH:-1}
 export VERL_PRINT_STEP_PROGRESS=${VERL_PRINT_STEP_PROGRESS:-1}
 export VERL_TEACHER_LOGPROB_STREAMING_MODE=${VERL_TEACHER_LOGPROB_STREAMING_MODE:-nonblocking}
@@ -52,6 +65,8 @@ VAL_FILE=${VAL_FILE:-}
 : "${VAL_FILE:?Set VAL_FILE to the validation parquet path.}"
 
 # ---- model and optimization ----
+# FA3 capture inherits its pinned provider; the direct route defaults to FA2.
+ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
 TEACHER_WORLD_SIZE=${TEACHER_WORLD_SIZE:-4}
@@ -168,6 +183,7 @@ fi
 
 MODEL=(
     actor_rollout_ref.model.path="${STUDENT_MODEL}"
+    +actor_rollout_ref.model.override_config.attn_implementation="${ATTN_IMPLEMENTATION}"
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )

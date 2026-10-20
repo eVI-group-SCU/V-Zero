@@ -1,25 +1,24 @@
 """Isolated SP1 Qwen3.5 actor overlay; production files and loss stay unchanged.
 
 Ray worker_process_setup_hook: packed_boundary.setup_worker (or call it from an
-existing setup hook). Both arms require SHX_PACKED_BOUNDARY_ARM=baseline|boundary
-and SHX_PACKED_AUDIT_DIR. Keep this module importable in every actor worker.
+existing setup hook). Both arms require VZERO_PACKED_BOUNDARY_ARM=baseline|boundary
+and VZERO_PACKED_AUDIT_DIR. Keep this module importable in every actor worker.
 """
 
+import inspect
+import json
+import os
+import socket
 from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
-import inspect
-import json
-import os
 from pathlib import Path
-import socket
 from types import MethodType
 
-
 API_VERSION = 1
-TICKET_KEY = "_shx_packed_boundary_ticket"
-_CALL = ContextVar("shx_packed_boundary_call", default=None)
+TICKET_KEY = "_vzero_packed_boundary_ticket"
+_CALL = ContextVar("vzero_packed_boundary_call", default=None)
 
 
 class _Ticket:
@@ -34,19 +33,19 @@ class _Ticket:
 
 
 def _options(arm=None, audit_dir=None):
-    arm = arm or os.environ.get("SHX_PACKED_BOUNDARY_ARM")
-    audit_dir = audit_dir or os.environ.get("SHX_PACKED_AUDIT_DIR")
+    arm = arm or os.environ.get("VZERO_PACKED_BOUNDARY_ARM")
+    audit_dir = audit_dir or os.environ.get("VZERO_PACKED_AUDIT_DIR")
     if arm not in ("baseline", "boundary") or not audit_dir:
-        raise RuntimeError("Set SHX_PACKED_BOUNDARY_ARM=baseline|boundary and SHX_PACKED_AUDIT_DIR.")
+        raise RuntimeError("Set VZERO_PACKED_BOUNDARY_ARM=baseline|boundary and VZERO_PACKED_AUDIT_DIR.")
     return arm, str(audit_dir)
 
 
 def segment_ids(offsets, total):
     if len(offsets) < 2 or offsets[0] != 0 or offsets[-1] != total or total >= 2**31:
         raise ValueError("Offsets must span exactly one nonempty int32 packed row.")
-    if any(type(x) is not int for x in offsets) or any(b <= a for a, b in zip(offsets, offsets[1:])):
+    if any(type(x) is not int for x in offsets) or any(b <= a for a, b in zip(offsets, offsets[1:], strict=False)):
         raise ValueError("Empty, noninteger or nonmonotonic packed segments are unsupported.")
-    return [i for i, (a, b) in enumerate(zip(offsets, offsets[1:])) for _ in range(b - a)]
+    return [i for i, (a, b) in enumerate(zip(offsets, offsets[1:], strict=False)) for _ in range(b - a)]
 
 
 def validate_layout(input_shape, position_shape, offsets, text_positions):
@@ -55,7 +54,7 @@ def validate_layout(input_shape, position_shape, offsets, text_positions):
     if tuple(position_shape) != (4, 1, input_shape[1]):
         raise ValueError("Expected Qwen3.5 position_ids [4, 1, total_tokens]; no axis repair is performed.")
     ids = segment_ids(offsets, input_shape[1])
-    expected = [j for a, b in zip(offsets, offsets[1:]) for j in range(b - a)]
+    expected = [j for a, b in zip(offsets, offsets[1:], strict=False) for j in range(b - a)]
     if text_positions != expected:
         raise ValueError("Text position resets do not match the nested input token boundaries.")
     return ids
@@ -89,7 +88,7 @@ class Audit:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
-        print("SHX_PACKED_BOUNDARY " + line, flush=True)
+        print("VZERO_PACKED_BOUNDARY " + line, flush=True)
 
     @contextmanager
     def training_batch(self):
@@ -101,14 +100,22 @@ class Audit:
             if not self.batch or not self.layers:
                 raise RuntimeError("No actor packed guard/model evidence in completed training batch.")
             for ticket in self.batch:
-                expected = {(name, phase, kind) for name in self.layers
-                            for phase in ("forward", "recompute") for kind in ("conv", "gdn")}
+                expected = {
+                    (name, phase, kind)
+                    for name in self.layers
+                    for phase in ("forward", "recompute")
+                    for kind in ("conv", "gdn")
+                }
                 missing = expected - ticket["seen"]
                 if missing:
                     raise RuntimeError(f"Missing actual GDN/checkpoint kernel evidence: {sorted(missing)[:4]}")
             self.counts["backward_batches"] += 1
-            self.emit("backward_batch_complete", microbatches=len(self.batch),
-                      gdn_layers=len(self.layers), counts=dict(self.counts))
+            self.emit(
+                "backward_batch_complete",
+                microbatches=len(self.batch),
+                gdn_layers=len(self.layers),
+                counts=dict(self.counts),
+            )
         except BaseException as exc:
             self.emit("audit_failure", error_type=type(exc).__name__, message=str(exc)[:500])
             raise
@@ -125,20 +132,37 @@ class Audit:
         with torch.no_grad():
             if tuple(positions.shape) != (4, 1, packed.shape[-1]):
                 raise ValueError("Expected position_ids [4, 1, total_tokens]; no axis repair is performed.")
-            ids = validate_layout(tuple(packed.shape), tuple(positions.shape), offsets,
-                                  positions.detach()[0, 0].cpu().tolist())
+            ids = validate_layout(
+                tuple(packed.shape), tuple(positions.shape), offsets, positions.detach()[0, 0].cpu().tolist()
+            )
             cu = torch.tensor(offsets, dtype=torch.int32, device=packed.device)
             seq = torch.tensor([ids], dtype=torch.int32, device=packed.device)
         self.next_ticket += 1
-        ticket = _Ticket(owner=self, id=self.next_ticket, cu=cu, seq=seq, offsets=offsets,
-                         train=self.batch is not None, calls=Counter(), seen=set())
+        ticket = _Ticket(
+            owner=self,
+            id=self.next_ticket,
+            cu=cu,
+            seq=seq,
+            offsets=offsets,
+            train=self.batch is not None,
+            calls=Counter(),
+            seen=set(),
+        )
         if self.batch is not None:
             self.batch.append(ticket)
         self.counts["packed_guards"] += 1
         mode = "train" if ticket["train"] else "inference"
-        self.emit("packed_guard", once=("guard", mode), mode=mode, ticket=ticket["id"],
-                  input_shape=list(packed.shape), position_shape=list(positions.shape),
-                  segments=len(offsets) - 1, offsets_head=offsets[:8], total_tokens=offsets[-1])
+        self.emit(
+            "packed_guard",
+            once=("guard", mode),
+            mode=mode,
+            ticket=ticket["id"],
+            input_shape=list(packed.shape),
+            position_shape=list(positions.shape),
+            segments=len(offsets) - 1,
+            offsets_head=offsets[:8],
+            total_tokens=offsets[-1],
+        )
         return dict(model_inputs, **{TICKET_KEY: ticket})
 
 
@@ -159,12 +183,21 @@ def _wrap_kernel(original, state, layer_name, kind):
         ticket["seen"].add((layer_name, phase, kind))
         mode = "train" if ticket["train"] else "inference"
         state.counts[f"{mode}_{phase}_{kind}"] += 1
-        state.emit("kernel_args", once=("kernel", mode, phase, kind), mode=mode, phase=phase,
-                   layer=layer_name, kernel=kind, native_arg=native, present=actual is not None,
-                   shape=list(actual.shape) if actual is not None else None,
-                   dtype=str(actual.dtype) if actual is not None else None,
-                   offsets_head=ticket["offsets"][:8], ticket=ticket["id"],
-                   callable_module=inspect.unwrap(original).__module__)
+        state.emit(
+            "kernel_args",
+            once=("kernel", mode, phase, kind),
+            mode=mode,
+            phase=phase,
+            layer=layer_name,
+            kernel=kind,
+            native_arg=native,
+            present=actual is not None,
+            shape=list(actual.shape) if actual is not None else None,
+            dtype=str(actual.dtype) if actual is not None else None,
+            offsets_head=ticket["offsets"][:8],
+            ticket=ticket["id"],
+            callable_module=inspect.unwrap(original).__module__,
+        )
         return original(*args, **kwargs)
 
     return call
@@ -207,7 +240,7 @@ def _wrap_decoder(original, state, name, linear):
 def _install_model(model, state, decoder_type):
     if getattr(model.config, "model_type", None) != "qwen3_5":
         raise RuntimeError("This overlay supports only the audited dense Qwen3.5 actor.")
-    if getattr(model, "_shx_packed_boundary", None) is not None:
+    if getattr(model, "_vzero_packed_boundary", None) is not None:
         raise RuntimeError("Model boundary overlay already installed.")
     layers = [(name, layer) for name, layer in model.named_modules() if isinstance(layer, decoder_type)]
     linear_names = []
@@ -233,22 +266,27 @@ def _install_model(model, state, decoder_type):
     if not linear_names:
         raise RuntimeError("No GDN layers found in this actor.")
     state.layers = tuple(linear_names)
-    model._shx_packed_boundary = state
+    model._vzero_packed_boundary = state
     text_config = getattr(model.config, "text_config", model.config)
     vision_config = getattr(model.config, "vision_config", None)
-    state.emit("model_wrapped", decoder_layers=len(layers), gdn_layers=len(linear_names),
-               checkpoint="unchanged_non_reentrant", model_type=model.config.model_type,
-               attention_selector=getattr(model.config, "_attn_implementation", None),
-               text_attention_selector=getattr(text_config, "_attn_implementation", None),
-               vision_attention_selector=getattr(vision_config, "_attn_implementation", None))
+    state.emit(
+        "model_wrapped",
+        decoder_layers=len(layers),
+        gdn_layers=len(linear_names),
+        checkpoint="unchanged_non_reentrant",
+        model_type=model.config.model_type,
+        attention_selector=getattr(model.config, "_attn_implementation", None),
+        text_attention_selector=getattr(text_config, "_attn_implementation", None),
+        vision_attention_selector=getattr(vision_config, "_attn_implementation", None),
+    )
     return model
 
 
 def _patch_engine(engine, state, torch, metadata_get, decoder_type):
-    if getattr(engine, "_shx_packed_boundary", None) is not None:
-        if engine._shx_packed_boundary.arm != state.arm:
+    if getattr(engine, "_vzero_packed_boundary", None) is not None:
+        if engine._vzero_packed_boundary.arm != state.arm:
             raise RuntimeError("Cannot switch arms inside one actor process.")
-        return engine._shx_packed_boundary
+        return engine._vzero_packed_boundary
     if engine.engine_config.forward_only:
         raise RuntimeError("Do not install the actor overlay on a reference/teacher engine.")
     if engine.engine_config.strategy != "fsdp" or engine.use_ulysses_sp or engine.ulysses_sequence_parallel_size != 1:
@@ -271,7 +309,9 @@ def _patch_engine(engine, state, torch, metadata_get, decoder_type):
 
     @wraps(original_prepare.__func__)
     def prepare(self, micro_batch):
-        if not metadata_get(micro_batch, "use_remove_padding", True) or metadata_get(micro_batch, "use_fused_kernels", False):
+        if not metadata_get(micro_batch, "use_remove_padding", True) or metadata_get(
+            micro_batch, "use_fused_kernels", False
+        ):
             raise RuntimeError("Microbatch metadata changed the approved packed/unfused path.")
         model_inputs, output_args = original_prepare(micro_batch)
         offsets = micro_batch["input_ids"].offsets().detach().cpu().tolist()
@@ -287,9 +327,14 @@ def _patch_engine(engine, state, torch, metadata_get, decoder_type):
     engine._build_module = MethodType(build, engine)
     engine.prepare_model_inputs = MethodType(prepare, engine)
     engine.forward_backward_batch = MethodType(batch, engine)
-    engine._shx_packed_boundary = state
-    state.emit("actor_engine_installed", engine_class=type(engine).__module__ + "." + type(engine).__qualname__,
-               sp=1, fused_head=False, production_loss="unchanged")
+    engine._vzero_packed_boundary = state
+    state.emit(
+        "actor_engine_installed",
+        engine_class=type(engine).__module__ + "." + type(engine).__qualname__,
+        sp=1,
+        fused_head=False,
+        production_loss="unchanged",
+    )
     return state
 
 
@@ -298,6 +343,7 @@ def install_engine(engine, *, arm=None, audit_dir=None):
     arm, audit_dir = _options(arm, audit_dir)
     import torch
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer
+
     from verl.utils import tensordict_utils as tu
     from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
@@ -311,7 +357,7 @@ def install_engine(engine, *, arm=None, audit_dir=None):
 
 
 def _patch_registry(registry, arm, audit_dir, installer):
-    previous = getattr(registry, "_shx_packed_boundary_options", None)
+    previous = getattr(registry, "_vzero_packed_boundary_options", None)
     if previous is not None:
         if previous != (arm, audit_dir):
             raise RuntimeError("Worker setup invoked with conflicting boundary arm/audit directory.")
@@ -329,7 +375,7 @@ def _patch_registry(registry, arm, audit_dir, installer):
         return engine
 
     registry.new = new
-    registry._shx_packed_boundary_options = (arm, audit_dir)
+    registry._vzero_packed_boundary_options = (arm, audit_dir)
 
 
 def setup_worker():
@@ -338,7 +384,17 @@ def setup_worker():
     from verl.workers.engine import EngineRegistry
 
     _patch_registry(EngineRegistry, arm, audit_dir, install_engine)
-    print("SHX_PACKED_BOUNDARY " + json.dumps(dict(
-        api=API_VERSION, event="worker_setup_installed", arm=arm, pid=os.getpid(),
-        registry=EngineRegistry.__module__ + "." + EngineRegistry.__qualname__,
-    ), sort_keys=True), flush=True)
+    print(
+        "VZERO_PACKED_BOUNDARY "
+        + json.dumps(
+            dict(
+                api=API_VERSION,
+                event="worker_setup_installed",
+                arm=arm,
+                pid=os.getpid(),
+                registry=EngineRegistry.__module__ + "." + EngineRegistry.__qualname__,
+            ),
+            sort_keys=True,
+        ),
+        flush=True,
+    )

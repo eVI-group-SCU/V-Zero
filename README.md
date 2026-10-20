@@ -18,7 +18,7 @@ The V-Zero-5K dataset is publicly available on Hugging Face: [`hao05/v-zero-5k`]
 
 ## Environment
 
-The complete dependency set is pinned in a single [`requirements.txt`](requirements.txt), exported from the AutoDL experiment environment. It targets Linux x86_64, Python 3.12.13, and CUDA 13.0. Run the following commands from the repository root:
+The base dependency set is pinned in [`requirements.txt`](requirements.txt), based on the AutoDL environment export and supplemented with the FA3 runtime dependencies. It targets Linux x86_64, Python 3.12.13, and CUDA 13.0. Run the following commands from the repository root:
 
 ```bash
 conda create -n v-zero python=3.12.13 -y
@@ -37,11 +37,26 @@ conda activate verl
 uv pip install -e . --no-deps
 ```
 
+The default FA3 training launcher additionally requires a shared `.venv` runtime,
+its Python base installation, and pre-populated model and kernel caches. Installing
+these dependencies alone does not prepare that runtime; follow the
+[FA3 setup and launch guide](scripts/README.md#fa3-training-through-the-main-launcher).
+
 ## Training
 
 The V-Zero training implementation is included under [`verl/`](verl/), with the public launcher in [`scripts/run_vzero_qwen35_vl_fsdp.sh`](scripts/run_vzero_qwen35_vl_fsdp.sh). It configures the on-policy distillation recipe with teacher replay, positive/negative evidence crops, and evidence-gated token distillation.
 
-See [`scripts/README.md`](scripts/README.md) for data schema, environment variables, and launch examples.
+The main training entry defaults to FA3 training. Run `--prepare` once, then
+`--launch` on **each allocated node**. The default `FA3_PROFILE=four_b` uses two
+nodes; `nine_b` uses four. Each node uses eight GPUs, split equally between student
+and teacher. Both profiles retain the baseline training behavior;
+`four_b_boundary` explicitly selects a separate packed-sequence boundary variant.
+
+The default recipe uses batch size 32, mini-batch size 16, eight rollouts, learning
+rate `1e-6`, 100 training steps and model-only checkpoints every ten steps. Configure
+`TOTAL_TRAINING_STEPS` and `SAVE_FREQ` before preparation to change the duration.
+See [the training guide](scripts/README.md) for shared runtime requirements, data
+fields, per-node commands, output records and the optional direct FA2 route.
 
 ## Annotation
 
@@ -67,8 +82,8 @@ Start the vLLM OpenAI-compatible server:
 
 ```bash
 bash scripts/start_vllm_server.sh \
-  --model <model-checkpoint-path-or-hf-id> \
-  --served-model-name <served-model-name> \
+  --model "/path/to/model" \
+  --served-model-name vzero \
   --port 8000 \
   --tensor-parallel-size 1 \
   --data-parallel-size 8
@@ -79,10 +94,10 @@ Run benchmark evaluation from another terminal:
 ```bash
 bash scripts/eval_benchmarks.sh \
   --dataset mmvp \
-  --model <model-checkpoint-path-or-hf-id> \
-  --served-model-name <served-model-name> \
-  --data-root <benchmark-data-root> \
-  --output-dir results/<run-name> \
+  --model "/path/to/model" \
+  --served-model-name vzero \
+  --data-root "/path/to/benchmarks" \
+  --output-dir results/mmvp-run1 \
   --engine vllm_server \
   --vllm-server-base-url http://127.0.0.1:8000/v1 \
   --vllm-server-request-concurrency 512 \
@@ -100,7 +115,7 @@ bash scripts/eval_benchmarks.sh \
 - [x] Release evaluation scripts
 - [x] Release model checkpoints
 - [x] Release the V-Zero-5K dataset
-- [ ] Add detailed reproduction instructions
+- [x] Document training setup, launch commands and evaluation entry points
 
 ## License
 

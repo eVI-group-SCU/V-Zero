@@ -1,17 +1,22 @@
 """CPU scheduling model: installed ordering/splitter, observed image spans, no GPU imports."""
-import importlib.util
+
 import contextlib
+import importlib.util
 import io
 import json
 import os
 import sys
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 from unittest.mock import patch as mock_patch
 
-MODULE = Path(os.environ.get("TEACHER_SCHEDULER_TEST_MODULE",
-                            Path(__file__).resolve().with_name("teacher_scheduler.py")))
+MODULE = Path(
+    os.environ.get(
+        "TEACHER_SCHEDULER_TEST_MODULE",
+        Path(__file__).resolve().parents[2] / "scripts/fa3/teacher_scheduler.py",
+    )
+)
 spec = importlib.util.spec_from_file_location("teacher_scheduler_test", MODULE)
 patch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(patch)
@@ -22,8 +27,9 @@ class OldScheduler:
         self.cache_config = SimpleNamespace(block_size=block)
         self.need_mamba_block_aligned_split = True
         self.use_eagle = False
-        self.request = SimpleNamespace(num_computed_tokens=0, num_tokens=tokens, num_prompt_tokens=tokens,
-                                       has_encoder_inputs=True)
+        self.request = SimpleNamespace(
+            num_computed_tokens=0, num_tokens=tokens, num_prompt_tokens=tokens, has_encoder_inputs=True
+        )
         self.spans, self.cache, self.budget = spans, cache, budget
         self.resident = set()
         self.running = False
@@ -88,8 +94,7 @@ class OldScheduler:
         if num_new_tokens:
             request.num_computed_tokens += num_new_tokens
             self.resident.update(selected)
-            self.resident = {i for i in self.resident
-                             if sum(self.spans[i]) > request.num_computed_tokens}
+            self.resident = {i for i in self.resident if sum(self.spans[i]) > request.num_computed_tokens}
             self.running = True
         return SimpleNamespace(num_scheduled_tokens={"request": num_new_tokens})
 
@@ -143,13 +148,26 @@ class TeacherSchedulerRegression(unittest.TestCase):
         self.assertEqual(event["encoder_cache"]["cache_size"], 16384)
         self.assertEqual(output.num_scheduled_tokens, {})
         patch.report_zero_progress(scheduler, SimpleNamespace(num_scheduled_tokens={"pending": 1}))
-        self.assertEqual(scheduler._shx_zero_steps, 0)
-        inference = {"dtype": "bfloat16", "tensor_model_parallel_size": 2, "max_model_len": 32768,
-                     "max_num_batched_tokens": 8192, "max_num_seqs": 1024, "enable_chunked_prefill": True,
-                     "enable_prefix_caching": True, "enforce_eager": True,
-                     "engine_kwargs": {"vllm": {"max_logprobs": 0, "mm_processor_cache_gb": 0,
-                                                "scheduler_cls": patch.SCHEDULER_CLASS,
-                                                "disable_log_stats": False, "quantization": None}}}
+        self.assertEqual(scheduler._vzero_zero_steps, 0)
+        inference = {
+            "dtype": "bfloat16",
+            "tensor_model_parallel_size": 2,
+            "max_model_len": 32768,
+            "max_num_batched_tokens": 8192,
+            "max_num_seqs": 1024,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": True,
+            "enforce_eager": True,
+            "engine_kwargs": {
+                "vllm": {
+                    "max_logprobs": 0,
+                    "mm_processor_cache_gb": 0,
+                    "scheduler_cls": patch.SCHEDULER_CLASS,
+                    "disable_log_stats": False,
+                    "quantization": None,
+                }
+            },
+        }
         kwargs = installed_engine_kwargs(inference)
         self.assertEqual(kwargs["tensor_parallel_size"], 2)
         self.assertNotIn("tensor_model_parallel_size", kwargs)
@@ -164,8 +182,15 @@ class TeacherSchedulerRegression(unittest.TestCase):
 
 
 def installed_engine_kwargs(inference):
-    keys = ("dtype", "max_model_len", "max_num_batched_tokens", "max_num_seqs",
-            "enable_chunked_prefill", "enable_prefix_caching", "enforce_eager")
+    keys = (
+        "dtype",
+        "max_model_len",
+        "max_num_batched_tokens",
+        "max_num_seqs",
+        "enable_chunked_prefill",
+        "enable_prefix_caching",
+        "enforce_eager",
+    )
     kwargs = {key: inference[key] for key in keys}
     kwargs["tensor_parallel_size"] = inference["tensor_model_parallel_size"]
     engine_kwargs = inference.get("engine_kwargs", {}).get("vllm", {}) or {}
@@ -188,10 +213,13 @@ def installed_pending_case(config_path, blocks):
     inference = teacher["inference"]
     vconfig = EngineArgs(model=teacher["model_path"], **installed_engine_kwargs(inference)).create_engine_config()
     budget = MultiModalBudget(vconfig, MULTIMODAL_REGISTRY)
-    results = {"encoder_compute_budget": budget.encoder_compute_budget,
-               "encoder_cache_size": budget.encoder_cache_size,
-               "mm_max_toks_per_item": budget.mm_max_toks_per_item,
-               "block_scope": "supplied candidates, NOT an observed live EngineCore block size", "cases": []}
+    results = {
+        "encoder_compute_budget": budget.encoder_compute_budget,
+        "encoder_cache_size": budget.encoder_cache_size,
+        "mm_max_toks_per_item": budget.mm_max_toks_per_item,
+        "block_scope": "supplied candidates, NOT an observed live EngineCore block size",
+        "cases": [],
+    }
     fixed = patch.patched_class(Scheduler)  # Also compile/validate both REAL installed schedule branches.
     for block in blocks:
         for cls, label in ((Scheduler, "old"), (fixed, "backport")):
@@ -201,11 +229,20 @@ def installed_pending_case(config_path, blocks):
             scheduler.use_eagle = scheduler.is_encoder_decoder = False
             scheduler.ec_connector = None
             scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=budget.encoder_cache_size)
-            request = SimpleNamespace(request_id="observed-pending-shape", num_computed_tokens=0,
-                                      num_tokens=19311, num_prompt_tokens=19311, has_encoder_inputs=True,
-                                      mm_features=[SimpleNamespace(identifier=str(i), mm_position=PlaceholderRange(offset=o, length=n))
-                                                   for i, (o, n) in enumerate(((4, 15708), (15756, 3312)))])
-            request.get_num_encoder_embeds = lambda i: request.mm_features[i].mm_position.get_num_embeds()
+            request = SimpleNamespace(
+                request_id="observed-pending-shape",
+                num_computed_tokens=0,
+                num_tokens=19311,
+                num_prompt_tokens=19311,
+                has_encoder_inputs=True,
+                mm_features=[
+                    SimpleNamespace(identifier=str(i), mm_position=PlaceholderRange(offset=o, length=n))
+                    for i, (o, n) in enumerate(((4, 15708), (15756, 3312)))
+                ],
+            )
+            request.get_num_encoder_embeds = lambda i, request=request: request.mm_features[
+                i
+            ].mm_position.get_num_embeds()
             chunks = []
             for _ in range(30):
                 if request.num_computed_tokens == request.num_tokens:
@@ -214,7 +251,8 @@ def installed_pending_case(config_path, blocks):
                 if label == "backport":
                     count = scheduler._mamba_block_aligned_split(request, count)
                 selected, count, _, _ = scheduler._try_schedule_encoder_inputs(
-                    request, request.num_computed_tokens, count, budget.encoder_compute_budget)
+                    request, request.num_computed_tokens, count, budget.encoder_compute_budget
+                )
                 if label == "old":
                     count = scheduler._mamba_block_aligned_split(request, count)
                 chunks.append(count)
@@ -226,9 +264,15 @@ def installed_pending_case(config_path, blocks):
                 for index, feature in enumerate(request.mm_features):
                     if feature.mm_position.offset + feature.mm_position.length <= request.num_computed_tokens:
                         scheduler.encoder_cache_manager.free_encoder_input(request, index)
-            results["cases"].append({"block_size": block, "scheduler": label, "chunks": chunks,
-                                     "computed": request.num_computed_tokens,
-                                     "complete": request.num_computed_tokens == request.num_tokens})
+            results["cases"].append(
+                {
+                    "block_size": block,
+                    "scheduler": label,
+                    "chunks": chunks,
+                    "computed": request.num_computed_tokens,
+                    "complete": request.num_computed_tokens == request.num_tokens,
+                }
+            )
     print("TEACHER_INSTALLED_CPU_CASE " + json.dumps(results), flush=True)
     if not all(case["complete"] for case in results["cases"] if case["scheduler"] == "backport"):
         raise AssertionError("Backport did not finish the observed shape; do not deploy as a confirmed fix")
