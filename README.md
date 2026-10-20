@@ -18,7 +18,7 @@ The V-Zero-5K dataset is publicly available on Hugging Face: [`hao05/v-zero-5k`]
 
 ## Environment
 
-The base dependency set is pinned in [`requirements.txt`](requirements.txt), exported from the AutoDL experiment environment. It targets Linux x86_64, Python 3.12.13, and CUDA 13.0. Run the following commands from the repository root:
+The base dependency set is pinned in [`requirements.txt`](requirements.txt), based on the AutoDL environment export and supplemented with the FA3 runtime dependencies. It targets Linux x86_64, Python 3.12.13, and CUDA 13.0. Run the following commands from the repository root:
 
 ```bash
 conda create -n v-zero python=3.12.13 -y

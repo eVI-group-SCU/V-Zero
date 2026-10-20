@@ -1,5 +1,7 @@
 # Exact dependency set exported from the repository's AutoDL environment on
-# 2026-09-03. It targets Linux x86_64, Python 3.12, and CUDA 13.0.
+# 2026-09-03, with FA3 runtime dependencies pinned to the verified training stack.
+# It targets Linux x86_64, Python 3.12, and CUDA 13.0.
+# The pinned FA3 provider is a separate kernel artifact; see scripts/fa3/README.md.
 #
 # Install every pinned package without re-resolving the intentionally overridden
 # constraints, then install this repository:
@@ -109,6 +111,8 @@ joblib==1.5.3
 json_repair==0.60.1
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+kernels-data==0.16.2
+kernels==0.15.2
 lark==1.2.2
 latex2sympy2_extended==1.11.0
 Levenshtein==0.27.3
@@ -253,6 +257,7 @@ six==1.17.0
 smart_open==7.6.1
 smmap==5.0.3
 sniffio==1.3.1
+socksio==1.0.0
 sse-starlette==3.4.4
 stack-data==0.6.3
 starlette==1.2.1
@@ -271,6 +276,7 @@ timeout-decorator==0.5.0
 tokenizers==0.23.0rc0
 tokenspeed-mla==0.1.2
 tokenspeed-triton==3.7.10.post20260531
+tomlkit==0.15.2
 torch @ https://download-r2.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=96911323dcfcd42028c7e8edde7bdf25bb187753234e8775f0f3f112e86a22db
 torch_c_dlpack_ext==0.1.5
 torchaudio @ https://download-r2.pytorch.org/whl/cu130/torchaudio-2.11.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=3fba988f4301fe13547fe5e99c76d9ae36a27e19ded82eeffed9d2456e12edef

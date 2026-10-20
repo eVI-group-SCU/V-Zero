@@ -51,6 +51,8 @@ second distillation method or replace the teacher/student loss.
   runtime stack is Python 3.12, PyTorch `2.11.0+cu130`, Transformers `5.9.0`,
   vLLM `0.22.1rc1.dev58+g68dafcca7`, FLA `0.5`, Triton `3.6`, and TileLang.
   The scheduler patch additionally checks the installed implementation structurally.
+- The Python provider loader requires `kernels==0.15.2`, `kernels-data==0.16.2`
+  and `tomlkit==0.15.2`, pinned in the root `requirements.txt`.
 - Training uses the immutable provider
   `kernels-community/flash-attn3@7cb368cf8278b583132eb72cbf312d54586df2e2`.
   Installing the `flash-attn` distribution alone does not configure this provider.
