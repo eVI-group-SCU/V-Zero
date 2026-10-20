@@ -18,26 +18,37 @@ Install the bundled training package in editable mode when setting up a fresh en
 
 ```bash
 cd V-Zero
-uv pip install -e .
+uv pip install -e . --no-deps
 ```
 
 ## FA3 training through the main launcher
 
-`run_vzero_qwen35_vl_fsdp.sh` defaults to the complete FA3 retraining runtime,
+`run_vzero_qwen35_vl_fsdp.sh` defaults to the FA3 training runtime,
 including teacher scheduler compatibility, FLA/TileLang dispatch, isolated Ray
 and tmux processes, and per-actor FA3 forward/backward verification.
 
-Choose `FA3_PROFILE=four_b` (two nodes), `four_b_boundary` (two nodes with the
-packed-sequence boundary correction), or `nine_b` (four nodes). Each node needs
-eight GPUs: four for the student and four for the teacher. All profiles use one shared implementation in `fa3/`. Defaults are
-100 steps, batch 32, mini-batch 16, eight rollouts, constant learning rate 1e-6,
-and model-only checkpoints every ten steps. Set `TOTAL_TRAINING_STEPS` and
-`SAVE_FREQ` to change the duration. The final step is always saved. `NNODES`
-may be 2 or 4; each node retains the four-student/four-teacher split.
-Set `CPUS_PER_NODE` to the allocated CPU count (default 184, minimum 16).
-Batch size, rollout count, optimizer, and SP=1 remain guarded to preserve this
-recipe. Incompatible settings fail before training. Both model sizes default to
-baseline; only `four_b_boundary` enables the separate packed-boundary correction.
+Select a profile before preparation:
+
+| `FA3_PROFILE` | Default student | Default nodes | Packed-sequence mode |
+| --- | --- | --- | --- |
+| `four_b` (default) | Qwen3.5-4B | 2 | Baseline |
+| `nine_b` | Qwen3.5-9B | 4 | Baseline |
+| `four_b_boundary` | Qwen3.5-4B | 2 | Explicit boundary variant |
+
+Each node needs eight GPUs: four for the student and four for the teacher. All
+profiles share `fa3/`. `NNODES` may override the node count to 2 or 4 while keeping
+this GPU split. Set `CPUS_PER_NODE` to the allocated CPU count (default 184), with
+sufficient CPUs for both worker placement groups and rollout tasks.
+
+Defaults are 100 steps, batch 32, mini-batch 16, eight rollouts, constant learning
+rate `1e-6`, no warmup and SP=1. Set `TOTAL_TRAINING_STEPS` and `SAVE_FREQ` to change
+the duration; the final step is also saved. Batch size, rollout count, optimizer
+and SP settings are guarded to preserve the recipe. Both model sizes use baseline
+behavior; only `four_b_boundary` enables the separate boundary variant.
+
+Checkpoints are synchronous and **model-only**, and all scheduled checkpoints are
+retained. Use a fresh output directory for each run. This runtime does not restore
+optimizer state or provide full training-state resume.
 
 The pinned training backend is:
 
@@ -49,7 +60,7 @@ Provide an existing compatible shared runtime containing `.venv`, its Python bas
 the downloaded model weights and populated kernel/Hugging Face caches. Installing
 `flash-attn` alone is insufficient. This entry does not provision cloud machines,
 install packages or download weights. The runtime must provide Ray and tmux and
-match the checks in the selected harness. The default FA3 call targets belong to
+meet the [runtime compatibility requirements](fa3/README.md#supported-recipe-and-compatibility). The default FA3 call targets belong to
 the pinned provider; a different kernel requires corresponding verified targets.
 
 Export the same settings on all nodes. Example paths below are placeholders:
@@ -57,6 +68,9 @@ Export the same settings on all nodes. Example paths below are placeholders:
 ```bash
 export FA3_PROFILE=four_b
 export RUN_TAG=vzero-fa3-4b-run1
+export TOTAL_TRAINING_STEPS=100
+export SAVE_FREQ=10
+export CPUS_PER_NODE=184
 export VZERO_FA3_SHARED_MOUNT=/shared
 export VZERO_FA3_ENV_ROOT=/shared/work/fa3-runtime
 export VZERO_FA3_PYTHON_BASE=/shared/work/python-base
@@ -67,7 +81,11 @@ export TRAIN_FILE=/shared/data/train.parquet
 export VAL_FILE=/shared/data/val.parquet
 ```
 
-The repository and runtime must be on the actual shared mount. `VZERO_FA3_TRAIN_PYTHON` defaults to
+Run commands from the repository root. For the 9B profile, set `FA3_PROFILE=nine_b`
+and `STUDENT_MODEL` to the Qwen3.5-9B directory.
+
+The repository, runtime, Python base, data, model weights and caches must be on the
+actual shared mount. `VZERO_FA3_TRAIN_PYTHON` defaults to
 `$VZERO_FA3_ENV_ROOT/.venv/bin/python`; caches default to its `.cache/huggingface`
 and `.cache/kernels` directories. The private W&B file must contain literal
 `export WANDB_BASE_URL=...` and `export WANDB_API_KEY=...` assignments; optional
@@ -84,7 +102,7 @@ bash scripts/run_vzero_qwen35_vl_fsdp.sh --prepare
 
 Preparation verifies image paths, dataset fields, model shards, dependencies and
 checkpoint space, then writes the resolved configuration and source fingerprints
-under `results/$RUN_TAG`. Use a fresh run name. Do not edit code/configuration
+under `results/$RUN_TAG`. Use a fresh run name containing lowercase letters, digits and hyphens, starting with a letter. Do not edit code/configuration
 between preparation and launch.
 
 Then run on **each allocated node**, using its distinct zero-based node rank:
@@ -112,11 +130,9 @@ VZERO_TRAIN_BACKEND=fa2 bash scripts/run_vzero_qwen35_vl_fsdp.sh
 ```
 
 The environment options and Hydra overrides below apply to that direct route.
-FA3 profiles use the same shell recipe with the guarded settings described above.
-They require fresh output directories and save model weights only: they do not
-support resuming optimizer state. Do not use a model-only checkpoint as a complete
-training-state checkpoint. Training attention selection is
-separate from vLLM rollout/teacher attention selection.
+FA3 profiles use the same shell recipe with the guarded settings described above,
+and accept environment settings rather than positional Hydra overrides. Training
+attention selection is separate from vLLM rollout/teacher attention selection.
 
 See [`fa3/README.md`](fa3/README.md) for the patch inventory,
 compatibility requirements and runtime evidence files.
@@ -131,36 +147,42 @@ The training parquet is expected to contain these columns:
 | `images` | Full image payloads used by the student rollout. |
 | `teacher_raw_prompt` | Positive teacher prompt messages containing the crop marker. |
 | `teacher_images` | Positive evidence crop payloads. |
-| `teacher_neg_raw_prompt` | Negative teacher prompt messages. |
+| `teacher_neg_raw_prompt` | Optional negative teacher messages. If absent, the positive teacher messages are reused with negative crop images substituted. |
 | `teacher_neg_images` | Negative or irrelevant evidence crop payloads. |
-| `reward_model` | Ground-truth metadata used by the verl reward path. |
+| `data_source` | Non-empty dataset identifier required by the default reward manager. |
+| `reward_model` | Metadata containing `ground_truth` for the default reward manager; preserve genuine null labels. |
 | `extra_info` | Optional metadata for logging and analysis. |
+
+The FA3 preflight requires image payloads to resolve to existing **absolute local
+paths on the shared mount**; embedded image bytes and remote URLs are not accepted.
+Provide one training Parquet and one non-empty validation Parquet. Preserve the
+original metadata fields; do not invent answer labels to satisfy the schema.
 
 For ablations, the same schema can include extra image columns such as `teacher_random_images`; pass the corresponding key with `TEACHER_CROP_IMAGE_KEY`.
 
-## Launch
+## Direct FA2 launch
 
 ```bash
 cd V-Zero
 
-STUDENT_MODEL=<student-model-path> \
-TEACHER_MODEL=<teacher-model-path> \
-TRAIN_FILE=<train-parquet-path> \
-VAL_FILE=<validation-parquet-path> \
+STUDENT_MODEL=/path/to/student \
+TEACHER_MODEL=/path/to/teacher \
+TRAIN_FILE=/path/to/train.parquet \
+VAL_FILE=/path/to/val.parquet \
 RUN_TAG=vzero_qwen35_27b_4b \
 VZERO_TRAIN_BACKEND=fa2 bash scripts/run_vzero_qwen35_vl_fsdp.sh
 ```
 
 Qwen3.5 thinking mode is disabled by default through `APPLY_CHAT_TEMPLATE_ENABLE_THINKING=False`.
 
-## Common Overrides
+## Direct FA2 overrides
 
 Use a local model root:
 
 ```bash
-MODEL_ROOT=<model-root> \
-TRAIN_FILE=<train-parquet-path> \
-VAL_FILE=<validation-parquet-path> \
+MODEL_ROOT=/path/to/models \
+TRAIN_FILE=/path/to/train.parquet \
+VAL_FILE=/path/to/val.parquet \
 VZERO_TRAIN_BACKEND=fa2 bash scripts/run_vzero_qwen35_vl_fsdp.sh
 ```
 
@@ -187,20 +209,26 @@ ROLLOUT_GPU_MEM_UTIL=0.35 TEACHER_GPU_MEM_UTIL=0.45 VZERO_TRAIN_BACKEND=fa2 bash
 Use a specific CUDA toolkit for JIT or extension builds:
 
 ```bash
-export CUDA_HOME=<cuda-toolkit-path>
+export CUDA_HOME=/path/to/cuda
 VZERO_TRAIN_BACKEND=fa2 bash scripts/run_vzero_qwen35_vl_fsdp.sh
 ```
 
 ## Outputs
 
-By default, logs and rollout generations are written under:
+FA3 outputs default to `results/$RUN_TAG/` (override with
+`VZERO_FA3_TRAIN_OUTPUT_DIR` before preparation). This includes resolved configs,
+per-node execution records, per-actor FA3 call records, update receipts,
+`checkpoints/`, and `training_complete.json`. See the
+[output inventory](fa3/README.md#evidence-and-failures) for verification details.
+
+For the direct FA2 route, logs and rollout generations default to:
 
 - `./final_logs/<RUN_TAG>/rollouts`
 - `./final_logs/<RUN_TAG>/val_generations`
 
-verl checkpoints are controlled by the underlying trainer config and experiment name. Set `PROJECT_NAME`, `EXPERIMENT_NAME`, `SAVE_FREQ`, and `TEST_FREQ` to match the desired experiment layout.
+Direct FA2 checkpoints are controlled by the underlying trainer config and experiment name. Set `PROJECT_NAME`, `EXPERIMENT_NAME`, `SAVE_FREQ`, and `TEST_FREQ` to match the desired experiment layout.
 
-## Key Flags
+## Direct FA2 Hydra flags
 
 - `distillation.enabled=True`
 - `distillation.teacher_models.teacher_model.model_path=<HF path>`

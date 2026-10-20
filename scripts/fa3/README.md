@@ -16,10 +16,9 @@ allocated training job. Preparation alone is not evidence of successful FA3 trai
 | `packed_boundary.py` | Audit packed Qwen3.5 positions in baseline mode. In explicit boundary mode, also pass sequence boundaries to the native convolution and Gated DeltaNet kernels, including checkpoint recomputation. |
 
 The profiles share all source files. `four_b` defaults to two nodes, `nine_b` to
-four; `four_b_boundary` is the explicit two-node packed-boundary variant. Baseline
-mode does **not** apply that numerical correction. FA3 attention and Gated DeltaNet
-are different kernels: selecting FA3 does not itself repair recurrent packed
-sequence boundaries.
+four. Both select baseline behavior. `four_b_boundary` is an explicit two-node
+variant that passes packed-sequence boundaries to the recurrent kernels; it is
+not enabled automatically by selecting FA3.
 
 ## Training framework fixes
 
@@ -39,6 +38,8 @@ second distillation method or replace the teacher/student loss.
 
 - Two or four exclusive nodes, eight GPUs per node, four student and four teacher
   GPUs on each node. SP=1; FSDP spans the student ranks.
+- `CPUS_PER_NODE` defaults to 184; match the allocated CPU resources and allow
+  capacity for both student/teacher placement groups and rollout tasks.
 - Batch 32, mini-batch 16, eight rollouts, constant learning rate `1e-6`, no warmup.
 - Defaults: 100 updates and save every ten updates. Override with
   `TOTAL_TRAINING_STEPS` and `SAVE_FREQ`; non-divisible final steps are also saved.
