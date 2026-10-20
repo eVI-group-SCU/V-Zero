@@ -56,7 +56,10 @@ def compute_relative_evidence_opd_weights(
     plus_full = _squeeze_single_logprob("teacher_logprobs", teacher_logprobs).float()
     minus_full = _squeeze_single_logprob("teacher_neg_logprobs", teacher_neg_logprobs).float()
     response_len = response_mask.shape[1]
-    response_end = prompt_width + response_len
+    if prompt_width < 1:
+        raise ValueError("Teacher replay requires a nonempty prompt.")
+    response_start = prompt_width - 1
+    response_end = response_start + response_len
     if plus_full.shape != minus_full.shape:
         raise ValueError(f"teacher positive/negative logprob shapes differ: {plus_full.shape} vs {minus_full.shape}.")
     if response_end > plus_full.shape[1]:
@@ -65,8 +68,8 @@ def compute_relative_evidence_opd_weights(
             f"{plus_full.shape[1]=}, {prompt_width=}, {response_len=}."
         )
 
-    plus = plus_full[:, prompt_width:response_end]
-    minus = minus_full[:, prompt_width:response_end]
+    plus = plus_full[:, response_start:response_end]
+    minus = minus_full[:, response_start:response_end]
     mask = response_mask.to(device=plus.device, dtype=plus.dtype)
     mask_bool = mask.bool()
 
