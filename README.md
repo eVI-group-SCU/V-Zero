@@ -1,6 +1,6 @@
 # V-Zero
 
-**V-Zero: Answer-Label-Free On-Policy Distillation with Contrastive Evidence Gating for Fine-Grained Visual Reasoning**
+**V-Zero: Gating On-Policy Distillation with Contrastive Visual Evidence for Fine-Grained Visual Reasoning**
 
 [[Paper]](https://arxiv.org/abs/2606.25319) [[Model]](https://huggingface.co/hao05/v-zero-4b) [[Dataset]](https://huggingface.co/datasets/hao05/v-zero-5k)
 
